@@ -19,6 +19,8 @@ const activeJob = ref<Job | null>(null)
 const pendingApply = ref<Version | null>(null)
 const confirmRollback = ref(false)
 const npmPackage = ref('')
+const npmRegistry = ref('')
+const npmRegistryFrom = ref('')
 const npmVersions = ref<NpmVersion[]>([])
 const npmWarning = ref('')
 const npmChoice = ref('')
@@ -51,8 +53,16 @@ async function load() {
 async function loadNpm() {
   npmLoading.value = true
   try {
-    const res = await api.get<{ package: string; versions: NpmVersion[]; warning: string }>('/upgrades/npm')
+    const res = await api.get<{
+      package: string
+      registry: string
+      registry_from: string
+      versions: NpmVersion[]
+      warning: string
+    }>('/upgrades/npm')
     npmPackage.value = res.package || ''
+    npmRegistry.value = res.registry || ''
+    npmRegistryFrom.value = res.registry_from || ''
     npmVersions.value = res.versions || []
     npmWarning.value = res.warning || ''
     if (!npmChoice.value || !npmVersions.value.some((v) => v.version === npmChoice.value)) {
@@ -216,7 +226,13 @@ function statusText(v: Version): string {
           <div>
             <div class="card-title">从 npm 安装</div>
             <div class="card-sub">
-              {{ npmPackage ? `直接从 ${npmPackage} 拉取，装进独立目录，旧版本保留可回滚` : '从 npm 拉取新版本' }}
+              {{ npmPackage ? `从 ${npmPackage} 拉取，装进独立目录，旧版本保留可回滚` : '从 npm 拉取新版本' }}
+            </div>
+            <div v-if="npmRegistry" class="small mono muted-2" style="margin-top: 5px; word-break: break-all">
+              源：{{ npmRegistry }}
+              <span class="badge badge-neutral" style="margin-left: 6px">
+                {{ npmRegistryFrom === 'config' ? '配置文件指定' : '服务器默认' }}
+              </span>
             </div>
           </div>
           <Download :size="20" color="var(--accent)" />

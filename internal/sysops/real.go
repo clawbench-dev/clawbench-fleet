@@ -330,3 +330,17 @@ func firstLine(s string) string {
 	}
 	return s
 }
+
+// NpmRegistry asks npm itself, so ~/.npmrc, /etc/npmrc and the built-in
+// default are all reflected. The platform only overrides this when
+// npm_registry is set in its own config.
+func (r *Real) NpmRegistry(ctx context.Context) (string, error) {
+	if _, err := exec.LookPath("npm"); err != nil {
+		return "", errors.New("服务器上没有 npm")
+	}
+	out, err := run(ctx, "npm", "config", "get", "registry")
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}

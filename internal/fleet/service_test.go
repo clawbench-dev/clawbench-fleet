@@ -336,15 +336,19 @@ func TestNpmVersionsAndInstall(t *testing.T) {
 	ctx := context.Background()
 	ac := AuditContext{Actor: "tester"}
 
-	list, warning := svc.ListNpmVersions(ctx)
-	if warning != "" {
-		t.Fatalf("unexpected warning: %s", warning)
+	catalog := svc.NpmCatalog(ctx)
+	if catalog.Warning != "" {
+		t.Fatalf("unexpected warning: %s", catalog.Warning)
 	}
-	if len(list) != 3 {
-		t.Fatalf("got %d versions, want 3", len(list))
+	if len(catalog.Versions) != 3 {
+		t.Fatalf("got %d versions, want 3", len(catalog.Versions))
 	}
-	if list[0].Version != "0.143.0" {
-		t.Fatalf("newest version should be first, got %s", list[0].Version)
+	if catalog.Versions[0].Version != "0.143.0" {
+		t.Fatalf("newest version should be first, got %s", catalog.Versions[0].Version)
+	}
+	// The page shows which registry is really in use, so it must be filled in.
+	if catalog.Registry == "" || catalog.RegistryFrom != "server" {
+		t.Fatalf("registry = %q from %q, want the server default", catalog.Registry, catalog.RegistryFrom)
 	}
 
 	v, err := svc.InstallFromNpm(ctx, "0.143.0", ac)
@@ -369,8 +373,8 @@ func TestNpmVersionsAndInstall(t *testing.T) {
 		t.Fatal("expected an error when installing the same version twice")
 	}
 
-	list, _ = svc.ListNpmVersions(ctx)
-	for _, item := range list {
+	catalog = svc.NpmCatalog(ctx)
+	for _, item := range catalog.Versions {
 		if item.Version == "0.143.0" && !item.Installed {
 			t.Fatal("installed version not marked as installed")
 		}
@@ -388,6 +392,14 @@ func TestNpmVersionsAndInstall(t *testing.T) {
 	}
 	if versions, _ := svc.ListVersions(); len(versions) != 2 {
 		t.Fatalf("expected 2 installed versions, got %d", len(versions))
+	}
+
+	// When the platform config pins a registry it wins over the server's own
+	// npm configuration, and the page says so.
+	svc.Cfg.Clawbench.NpmRegistry = "https://mirror.example.com/"
+	catalog = svc.NpmCatalog(ctx)
+	if catalog.Registry != "https://mirror.example.com/" || catalog.RegistryFrom != "config" {
+		t.Fatalf("registry = %q from %q, want the configured mirror", catalog.Registry, catalog.RegistryFrom)
 	}
 }
 

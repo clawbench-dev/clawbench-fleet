@@ -452,7 +452,7 @@ bob,李四,产品部
 
 **A. 从 npm 安装（主路径）**
 
-1. 升级中心向 npm 查询 `@xulongzhe/clawbench` 的已发布版本，列表里标出本机已有的。
+1. 升级中心向 npm 查询 `@xulongzhe/clawbench` 的已发布版本，列表里标出本机已有的，并显示当前实际用的是哪个源（配置文件指定 / 服务器默认）。
 2. 管理员选一个版本点“安装到本机”。
 3. 平台执行 `npm install --prefix <临时目录> @xulongzhe/clawbench@<版本>`。装到临时目录而不是全局，是为了多个版本能共存。
 4. 从 `node_modules/@xulongzhe/clawbench-linux-<arch>/bin/clawbench` 取出可执行文件，复制到 `versions/<版本>/clawbench`，权限 0755。
@@ -642,7 +642,7 @@ WantedBy=multi-user.target
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/upgrades` | 当前版本、已上传版本、最近任务 |
-| GET | `/api/upgrades/npm` | npm 上可用的版本，标出本机已安装的 |
+| GET | `/api/upgrades/npm` | npm 上可用的版本，标出本机已安装的，并返回实际生效的源 |
 | POST | `/api/upgrades/npm/{version}/install` | 从 npm 下载并安装到本机 |
 | POST | `/api/upgrades/upload` | 上传二进制（multipart，离线兜底） |
 | POST | `/api/upgrades/{version}/pilot` | 试点，body：`{tenant_id}` |

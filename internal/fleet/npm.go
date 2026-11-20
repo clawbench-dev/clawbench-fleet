@@ -23,6 +23,18 @@ type NpmVersionInfo struct {
 	Installed bool   `json:"installed"`
 }
 
+// NpmCatalog is everything the upgrade page needs to show where versions come
+// from: which package, which registry is actually in effect, and the versions.
+type NpmCatalog struct {
+	Package  string `json:"package"`
+	Registry string `json:"registry"`
+	// RegistryFrom is "config" when the platform config pins the registry,
+	// otherwise "server" (npm's own .npmrc files and default).
+	RegistryFrom string           `json:"registry_from"`
+	Versions     []NpmVersionInfo `json:"versions"`
+	Warning      string           `json:"warning"`
+}
+
 func (s *Service) NpmPackage() string { return s.Cfg.Clawbench.NpmPackage }
 
 // normalizeVersion makes "v0.143.0" and "0.143.0" comparable. Clawbench
@@ -32,20 +44,36 @@ func normalizeVersion(v string) string {
 	return strings.TrimPrefix(strings.TrimSpace(v), "v")
 }
 
-// ListNpmVersions asks npm for the published versions and marks the ones this
-// machine already has. A failure is returned as a message rather than an error
+// NpmCatalog asks npm for the published versions and marks the ones this
+// machine already has. Failures are reported as a message rather than an error
 // because the page must keep working when the server has no npm or no network.
-func (s *Service) ListNpmVersions(ctx context.Context) ([]NpmVersionInfo, string) {
+func (s *Service) NpmCatalog(ctx context.Context) NpmCatalog {
+	out := NpmCatalog{
+		Package:  s.Cfg.Clawbench.NpmPackage,
+		Versions: []NpmVersionInfo{},
+	}
+	// Show the registry npm would really use. A configured override wins over
+	// the server's own .npmrc, so there is no point asking npm in that case.
+	if s.Cfg.Clawbench.NpmRegistry != "" {
+		out.Registry = s.Cfg.Clawbench.NpmRegistry
+		out.RegistryFrom = "config"
+	} else if reg, err := s.Sys.NpmRegistry(ctx); err == nil {
+		out.Registry = reg
+		out.RegistryFrom = "server"
+	} else {
+		out.Warning = err.Error()
+	}
+
 	raw, err := s.Sys.NpmVersions(ctx, s.Cfg.Clawbench.NpmPackage, s.Cfg.Clawbench.NpmRegistry)
 	if err != nil {
-		return nil, err.Error()
+		out.Warning = err.Error()
+		return out
 	}
 	installed, _ := s.Store.ListVersions()
 	have := make(map[string]bool, len(installed))
 	for _, v := range installed {
 		have[normalizeVersion(v.Version)] = true
 	}
-	out := make([]NpmVersionInfo, 0, len(raw))
 	seen := make(map[string]bool, len(raw))
 	for _, v := range raw {
 		v = strings.TrimSpace(v)
@@ -53,11 +81,13 @@ func (s *Service) ListNpmVersions(ctx context.Context) ([]NpmVersionInfo, string
 			continue
 		}
 		seen[v] = true
-		out = append(out, NpmVersionInfo{Version: v, Installed: have[normalizeVersion(v)]})
+		out.Versions = append(out.Versions, NpmVersionInfo{Version: v, Installed: have[normalizeVersion(v)]})
 	}
 	// npm returns oldest first; the page wants the newest at the top.
-	sort.SliceStable(out, func(i, j int) bool { return compareVersions(out[i].Version, out[j].Version) > 0 })
-	return out, ""
+	sort.SliceStable(out.Versions, func(i, j int) bool {
+		return compareVersions(out.Versions[i].Version, out.Versions[j].Version) > 0
+	})
+	return out
 }
 
 // InstallFromNpm downloads one version into a throwaway directory and copies

@@ -378,3 +378,7 @@ func (f *Fake) NpmInstall(ctx context.Context, prefix, pkg, version, registry st
 	script := "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo " + version + "; exit 0; fi\nexit 0\n"
 	return os.WriteFile(bin, []byte(script), 0o755)
 }
+
+func (f *Fake) NpmRegistry(ctx context.Context) (string, error) {
+	return "https://registry.npmjs.org/", nil
+}

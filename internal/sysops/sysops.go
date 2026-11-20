@@ -51,6 +51,9 @@ type System interface {
 	// NpmInstall installs pkg@version into prefix, never into the global npm
 	// prefix, so several versions can be kept side by side.
 	NpmInstall(ctx context.Context, prefix, pkg, version, registry string) error
+	// NpmRegistry reports the registry npm would actually use, after the
+	// server's own .npmrc files are taken into account.
+	NpmRegistry(ctx context.Context) (string, error)
 }
 
 // NpmPlatformPackage maps a wrapper package such as "@scope/clawbench" to the

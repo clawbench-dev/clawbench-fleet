@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"strconv"
 
-	"clawbench-fleet/internal/fleet"
 	"clawbench-fleet/internal/store"
 )
 
@@ -127,15 +126,7 @@ func (s *Server) handleJobArtifact(w http.ResponseWriter, r *http.Request) {
 // network being down is reported as a warning instead of an error so the page
 // still renders and the offline upload path stays usable.
 func (s *Server) handleNpmVersions(w http.ResponseWriter, r *http.Request) {
-	versions, warning := s.svc.ListNpmVersions(r.Context())
-	if versions == nil {
-		versions = []fleet.NpmVersionInfo{}
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"package":  s.svc.NpmPackage(),
-		"versions": versions,
-		"warning":  warning,
-	})
+	writeJSON(w, http.StatusOK, s.svc.NpmCatalog(r.Context()))
 }
 
 func (s *Server) handleNpmInstall(w http.ResponseWriter, r *http.Request) {
