@@ -1,0 +1,15 @@
+[Unit]
+Description=Clawbench Fleet - multi-tenant Clawbench instance console
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/clawbench-fleet --config /etc/clawbench-fleet/config.yaml
+Restart=always
+RestartSec=3
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

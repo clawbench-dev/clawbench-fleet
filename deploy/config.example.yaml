@@ -1,0 +1,49 @@
+# Clawbench Fleet 平台配置示例
+# 安装脚本会把它写到 /etc/clawbench-fleet/config.yaml
+
+# 管理界面的监听地址。建议用防火墙把 30000 限制到管理员网段。
+listen: "0.0.0.0:30000"
+
+# 平台自己的数据（数据库、备份、回收站、日志）
+data_dir: "/var/lib/clawbench-fleet"
+
+clawbench:
+  # Clawbench 版本目录和 current 软链的位置
+  install_dir: "/opt/clawbench-fleet"
+  # 租户端口范围；每个租户预留 3 个（主端口 + 2 个预留）
+  port_start: 21000
+  port_end: 29999
+  ports_per_tenant: 3
+  # Linux 用户 UID 分配范围
+  uid_start: 3000
+  uid_end: 9999
+  # 新建租户的默认资源上限（systemd CPUQuota / MemoryMax / TasksMax）
+  default_cpu_quota: "200%"
+  default_memory_max: "4G"
+  default_tasks_max: 512
+  # 单个租户家目录超过这个值就在总览页提醒（0 = 关闭提醒）
+  disk_warn_gb: 5
+  # 是否允许员工在实例里开端口转发（默认关，防止绕过管理直接对外暴露端口）
+  allow_port_forward: false
+  # 员工地址里显示的主机名；留空自动探测本机内网 IP
+  public_host: ""
+
+backup:
+  enabled: true
+  hour: 3
+  retention_days: 7
+
+trash:
+  retention_days: 30
+
+audit:
+  retention_days: 180
+
+tls:
+  # 留空表示 HTTP；填证书目录则启用 HTTPS（tls.crt/tls.key 或 cert.pem/key.pem）
+  cert_dir: ""
+
+system:
+  home_root: "/home"
+  systemd_dir: "/etc/systemd/system"
+  user_shell: "/usr/sbin/nologin"

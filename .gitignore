@@ -1,0 +1,8 @@
+/clawbench-fleet
+/.fleet-dev/
+/web/node_modules/
+/web/dist/
+/internal/web/dist/*
+!/internal/web/dist/.gitkeep
+*.log
+.DS_Store
