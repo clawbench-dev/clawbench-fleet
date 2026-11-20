@@ -9,17 +9,19 @@ import (
 )
 
 type Overview struct {
-	Host           HostStats           `json:"host"`
-	Counts         map[string]int      `json:"counts"`
-	Total          int                 `json:"total"`
-	Anomalies      []TenantDTO         `json:"anomalies"`
-	DiskWarnings   []TenantDTO         `json:"disk_warnings"`
-	RecentAudit    []domain.AuditEntry `json:"recent_audit"`
-	RecentJobs     []domain.Job        `json:"recent_jobs"`
-	CurrentVersion string              `json:"current_version"`
-	Orphans        []string            `json:"orphans"`
-	Mode           string              `json:"mode"`
-	BackupEnabled  bool                `json:"backup_enabled"`
+	Host           HostStats            `json:"host"`
+	Counts         map[string]int       `json:"counts"`
+	Total          int                  `json:"total"`
+	Anomalies      []TenantDTO          `json:"anomalies"`
+	DiskWarnings   []TenantDTO          `json:"disk_warnings"`
+	RecentAudit    []domain.AuditEntry  `json:"recent_audit"`
+	RecentJobs     []domain.Job         `json:"recent_jobs"`
+	CurrentVersion string               `json:"current_version"`
+	Orphans        []string             `json:"orphans"`
+	Mode           string               `json:"mode"`
+	BackupEnabled  bool                 `json:"backup_enabled"`
+	OpenReports    int                  `json:"open_reports"`
+	GuestReports   []domain.GuestReport `json:"guest_reports"`
 }
 
 func (s *Service) Overview() (*Overview, error) {
@@ -51,6 +53,11 @@ func (s *Service) Overview() (*Overview, error) {
 		orphans = []string{}
 	}
 	diskWarnings := s.diskWarnings()
+	openReports, _ := s.Store.CountOpenGuestReports()
+	guestReports, _ := s.Store.ListGuestReports(true, 10)
+	if guestReports == nil {
+		guestReports = []domain.GuestReport{}
+	}
 	currentVersion := ""
 	if v, err := s.Store.CurrentVersion(); err == nil {
 		currentVersion = v.Version
@@ -69,6 +76,8 @@ func (s *Service) Overview() (*Overview, error) {
 		Orphans:        orphans,
 		Mode:           s.Sys.Mode(),
 		BackupEnabled:  s.Settings().BackupEnabled,
+		OpenReports:    openReports,
+		GuestReports:   guestReports,
 	}, nil
 }
 

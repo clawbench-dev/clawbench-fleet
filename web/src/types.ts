@@ -167,6 +167,9 @@ export interface Settings {
   audit_retention_days: number
   allow_port_forward: boolean
   public_host: string
+  guest_enabled: boolean
+  guest_notice: string
+  guest_help: string
 }
 
 export interface Overview {
@@ -181,6 +184,36 @@ export interface Overview {
   orphans: string[]
   mode: string
   backup_enabled: boolean
+  open_reports: number
+  guest_reports: GuestReport[]
+}
+
+export interface GuestReport {
+  id: number
+  tenant_id: number
+  tenant_name: string
+  message: string
+  created_at: string
+  ip: string
+  handled_at: string
+  handled_by: string
+}
+
+export interface GuestInstance {
+  id: number
+  username: string
+  display_name: string
+  port: number
+  address: string
+  status: string
+  disk_warn: boolean
+}
+
+export interface GuestPage {
+  enabled: boolean
+  notice: string
+  help: string
+  items: GuestInstance[]
 }
 
 export interface TrashItem extends Tenant {

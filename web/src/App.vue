@@ -8,16 +8,19 @@ import { auth, loadMe } from './stores/auth'
 const route = useRoute()
 const router = useRouter()
 
+// Pages anyone may open without logging in.
+const publicPaths = ['/login', '/guest']
+
 onMounted(async () => {
   await loadMe()
-  if (!auth.admin && route.path !== '/login') {
+  if (!auth.admin && !publicPaths.includes(route.path)) {
     router.replace('/login')
   }
 })
 
 window.addEventListener('fleet:unauthorized', () => {
   auth.admin = null
-  if (route.path !== '/login') {
+  if (!publicPaths.includes(route.path)) {
     router.replace('/login')
   }
 })
@@ -27,7 +30,7 @@ window.addEventListener('fleet:unauthorized', () => {
   <div v-if="!auth.ready" class="login-page">
     <div class="muted">加载中…</div>
   </div>
-  <router-view v-else-if="route.path === '/login'" />
+  <router-view v-else-if="publicPaths.includes(route.path)" />
   <AppShell v-else>
     <router-view />
   </AppShell>

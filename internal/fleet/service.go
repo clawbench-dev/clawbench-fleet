@@ -113,6 +113,7 @@ func SettingsFromConfig(cfg config.Config) domain.Settings {
 		AuditRetention:   cfg.Audit.RetentionDays,
 		AllowPortForward: cfg.Clawbench.AllowPortForward,
 		PublicHost:       cfg.Clawbench.PublicHost,
+		GuestEnabled:     true,
 	}
 }
 

@@ -13,6 +13,7 @@ import {
 import { api } from '../api'
 import MetricBar from '../components/MetricBar.vue'
 import StatusBadge from '../components/StatusBadge.vue'
+import { toast } from '../stores/toast'
 import type { Overview } from '../types'
 import { actionLabel, formatBytes, formatPercent, formatTime } from '../utils'
 
@@ -34,6 +35,16 @@ onMounted(() => {
   timer = window.setInterval(load, 5000)
 })
 onBeforeUnmount(() => window.clearInterval(timer))
+
+async function resolveReport(id: number) {
+  try {
+    await api.post(`/reports/${id}/resolve`)
+    toast('已标记为处理完', 'success')
+    load()
+  } catch (e: any) {
+    toast(e?.message || '操作失败', 'error')
+  }
+}
 
 const counts = computed(() => data.value?.counts || {})
 const running = computed(() => counts.value.running || 0)
@@ -140,6 +151,35 @@ const diskPercent = computed(() => {
               <td class="num small" style="color: var(--amber)">{{ formatBytes(t.disk_bytes) }}</td>
               <td class="small mono">{{ t.address }}</td>
               <td class="actions"><router-link class="btn btn-sm" :to="`/tenants/${t.id}`">查看</router-link></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div v-if="data?.guest_reports?.length" class="card" style="margin-top: 16px; border-color: rgba(91, 140, 255, 0.35)">
+      <div class="card-header">
+        <div>
+          <div class="card-title">员工报障</div>
+          <div class="card-sub">员工在自助页点的「打不开」，处理完点一下「已处理」</div>
+        </div>
+        <span class="badge badge-neutral">{{ data.open_reports }} 条待处理</span>
+      </div>
+      <div class="table-wrap">
+        <table class="table">
+          <thead><tr><th>员工</th><th>说明</th><th>时间</th><th>来源 IP</th><th></th></tr></thead>
+          <tbody>
+            <tr v-for="r in data.guest_reports" :key="r.id">
+              <td>
+                <router-link v-if="r.tenant_id" :to="`/tenants/${r.tenant_id}`">{{ r.tenant_name }}</router-link>
+                <span v-else>{{ r.tenant_name }}</span>
+              </td>
+              <td class="small" style="max-width: 360px">{{ r.message || '（没填）' }}</td>
+              <td class="small muted-2">{{ formatTime(r.created_at) }}</td>
+              <td class="small mono muted-2">{{ r.ip }}</td>
+              <td class="actions">
+                <button class="btn btn-sm" type="button" @click="resolveReport(r.id)">已处理</button>
+              </td>
             </tr>
           </tbody>
         </table>

@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router'
 
 import AuditView from './views/AuditView.vue'
+import GuestView from './views/GuestView.vue'
 import ImportView from './views/ImportView.vue'
 import LoginView from './views/LoginView.vue'
 import OverviewView from './views/OverviewView.vue'
@@ -15,6 +16,7 @@ export const router = createRouter({
   history: createWebHistory(),
   routes: [
     { path: '/login', component: LoginView, meta: { title: '登录' } },
+    { path: '/guest', component: GuestView, meta: { title: '实例地址' } },
     {
       path: '/',
       component: OverviewView,

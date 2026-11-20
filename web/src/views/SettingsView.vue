@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { KeyRound, Save, Server, ShieldCheck } from 'lucide-vue-next'
 import { api } from '../api'
@@ -19,6 +19,8 @@ const meta = ref<{
 const saving = ref(false)
 const pwd = ref({ current_password: '', new_password: '', confirm: '' })
 const pwdSaving = ref(false)
+
+const guestURL = computed(() => window.location.origin + '/guest')
 
 async function load() {
   try {
@@ -171,6 +173,43 @@ async function changePassword() {
             <input v-model="settings.allow_port_forward" class="checkbox" type="checkbox" />
             允许员工在自己的实例里开端口转发
           </label>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top: 16px">
+      <div class="card-header">
+        <div>
+          <div class="card-title">员工自助页</div>
+          <div class="card-sub">免登录的只读页面，员工在上面查自己的实例地址和端口</div>
+        </div>
+        <a class="btn btn-sm" :href="`/guest`" target="_blank" rel="noopener">打开看看</a>
+      </div>
+      <div class="stack">
+        <label class="row small">
+          <input v-model="settings.guest_enabled" class="checkbox" type="checkbox" />
+          开启员工自助页（任何能访问本机的人都能看到实例名和端口，不需要登录）
+        </label>
+        <div class="field">
+          <label>公告（显示在页面顶部，可留空）</label>
+          <textarea
+            v-model="settings.guest_notice"
+            class="textarea"
+            maxlength="500"
+            placeholder="例如：本周六 9:00-12:00 例行维护，期间实例可能短暂中断"
+          />
+        </div>
+        <div class="field">
+          <label>使用说明（显示在页面底部，可留空则用默认文案）</label>
+          <textarea
+            v-model="settings.guest_help"
+            class="textarea"
+            maxlength="2000"
+            placeholder="告诉员工怎么用、找谁帮忙"
+          />
+        </div>
+        <div class="small muted-2">
+          页面地址：<a class="mono" :href="guestURL" target="_blank" rel="noopener">{{ guestURL }}</a>
         </div>
       </div>
     </div>

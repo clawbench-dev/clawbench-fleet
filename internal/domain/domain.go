@@ -158,6 +158,9 @@ type Settings struct {
 	AuditRetention   int    `json:"audit_retention_days"`
 	AllowPortForward bool   `json:"allow_port_forward"`
 	PublicHost       string `json:"public_host"`
+	GuestEnabled     bool   `json:"guest_enabled"`
+	GuestNotice      string `json:"guest_notice"`
+	GuestHelp        string `json:"guest_help"`
 }
 
 type Metrics struct {
@@ -166,6 +169,18 @@ type Metrics struct {
 	PIDs        int     `json:"pids"`
 	DiskBytes   int64   `json:"disk_bytes"`
 	SampledAt   string  `json:"sampled_at"`
+}
+
+// GuestReport is a "my instance won't open" note left from the public page.
+type GuestReport struct {
+	ID         int64  `json:"id"`
+	TenantID   int64  `json:"tenant_id"`
+	TenantName string `json:"tenant_name"`
+	Message    string `json:"message"`
+	CreatedAt  string `json:"created_at"`
+	IP         string `json:"ip"`
+	HandledAt  string `json:"handled_at"`
+	HandledBy  string `json:"handled_by"`
 }
 
 type HealthInfo struct {

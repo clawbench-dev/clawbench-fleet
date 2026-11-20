@@ -62,6 +62,8 @@ async function submit() {
       </button>
 
       <div v-if="mode === 'dev'" class="login-hint">开发模式默认账号 admin，密码 admin123</div>
+
+      <router-link class="guest-entry" to="/guest">我是员工，只看实例地址 →</router-link>
     </form>
   </div>
 </template>

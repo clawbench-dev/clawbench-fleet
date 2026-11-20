@@ -26,6 +26,7 @@ type Server struct {
 	cfg     config.Config
 	mux     *http.ServeMux
 	limiter *loginLimiter
+	reports *slidingLimiter
 }
 
 type ctxKey string
@@ -38,6 +39,7 @@ func New(svc *fleet.Service, cfg config.Config) *Server {
 		cfg:     cfg,
 		mux:     http.NewServeMux(),
 		limiter: newLoginLimiter(),
+		reports: newSlidingLimiter(10, time.Hour),
 	}
 	s.routes()
 	return s
@@ -55,6 +57,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/auth/password", s.protected(s.handleChangePassword))
 
 	s.mux.HandleFunc("GET /api/overview", s.protected(s.handleOverview))
+
+	s.mux.HandleFunc("GET /api/public/instances", s.handleGuestPage)
+	s.mux.HandleFunc("POST /api/public/reports", s.handleGuestReport)
+	s.mux.HandleFunc("GET /api/reports", s.protected(s.handleListReports))
+	s.mux.HandleFunc("POST /api/reports/{id}/resolve", s.protected(s.handleResolveReport))
 
 	s.mux.HandleFunc("GET /api/tenants", s.protected(s.handleListTenants))
 	s.mux.HandleFunc("GET /api/tenants/scan", s.protected(s.handleScanTenants))
@@ -155,6 +162,9 @@ func (s *Server) withHeaders(next http.Handler) http.Handler {
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		if strings.HasPrefix(r.URL.Path, "/api/") {
 			w.Header().Set("Cache-Control", "no-store")
+		}
+		if r.URL.Path == "/guest" {
+			w.Header().Set("X-Robots-Tag", "noindex")
 		}
 		next.ServeHTTP(w, r)
 	})
@@ -322,4 +332,44 @@ func (l *loginLimiter) reset(ip string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	delete(l.m, ip)
+}
+
+// slidingLimiter caps how often one IP may hit a public endpoint inside a
+// time window. Used for the guest report button.
+type slidingLimiter struct {
+	mu     sync.Mutex
+	m      map[string][]time.Time
+	max    int
+	window time.Duration
+}
+
+func newSlidingLimiter(max int, window time.Duration) *slidingLimiter {
+	return &slidingLimiter{m: map[string][]time.Time{}, max: max, window: window}
+}
+
+func (l *slidingLimiter) allow(key string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	nowT := time.Now()
+	cutoff := nowT.Add(-l.window)
+	kept := make([]time.Time, 0, len(l.m[key])+1)
+	for _, t := range l.m[key] {
+		if t.After(cutoff) {
+			kept = append(kept, t)
+		}
+	}
+	if len(kept) >= l.max {
+		l.m[key] = kept
+		return false
+	}
+	l.m[key] = append(kept, nowT)
+	// Keep the map from growing forever on a long-running host.
+	if len(l.m) > 4096 {
+		for k, v := range l.m {
+			if len(v) == 0 || !v[len(v)-1].After(cutoff) {
+				delete(l.m, k)
+			}
+		}
+	}
+	return true
 }
