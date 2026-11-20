@@ -58,12 +58,18 @@ type CreateTenantInput struct {
 
 type TenantDTO struct {
 	domain.Tenant
-	Address string         `json:"address"`
-	Metrics domain.Metrics `json:"metrics"`
+	Address   string         `json:"address"`
+	Metrics   domain.Metrics `json:"metrics"`
+	Protected bool           `json:"protected"`
 }
 
 func (s *Service) TenantDTO(t domain.Tenant) TenantDTO {
-	return TenantDTO{Tenant: t, Address: s.Address(t), Metrics: s.GetMetrics(t.ID)}
+	return TenantDTO{
+		Tenant:    t,
+		Address:   s.Address(t),
+		Metrics:   s.GetMetrics(t.ID),
+		Protected: domain.ProtectedUsername(t.Username),
+	}
 }
 
 func (s *Service) ListTenants(f store.TenantFilter) ([]TenantDTO, int, error) {
@@ -170,7 +176,7 @@ func (s *Service) CreateTenant(ctx context.Context, in CreateTenantInput, ac Aud
 	if uid, gid, err := s.Sys.LookupIDs(ctx, username); err == nil {
 		t.UID, t.GID = uid, gid
 	}
-	if err := s.writeTenantConfig(username, t.Port, t.UID, t.GID, password); err != nil {
+	if err := s.writeTenantConfig(t, password); err != nil {
 		s.rollbackCreate(ctx, t)
 		return nil, "", fmt.Errorf("写租户配置失败：%w", err)
 	}
@@ -427,13 +433,12 @@ func (s *Service) ResetPassword(ctx context.Context, id int64, ac AuditContext) 
 	if err != nil {
 		return nil, "", err
 	}
-	uid, gid := t.UID, t.GID
-	if uid == 0 {
-		if uid, gid, err = s.Sys.LookupIDs(ctx, t.Username); err != nil {
+	if t.UID == 0 {
+		if t.UID, t.GID, err = s.Sys.LookupIDs(ctx, t.Username); err != nil {
 			return nil, "", err
 		}
 	}
-	if err := s.writeTenantConfig(t.Username, t.Port, uid, gid, password); err != nil {
+	if err := s.writeTenantConfig(t, password); err != nil {
 		return nil, "", fmt.Errorf("写配置失败：%w", err)
 	}
 	if err := s.Sys.Restart(ctx, t.UnitName); err != nil {
@@ -467,19 +472,18 @@ func (s *Service) RepairTenant(ctx context.Context, id int64, ac AuditContext) (
 	}
 	defer s.release()
 
-	uid, gid := t.UID, t.GID
-	if uid == 0 {
-		if uid, gid, err = s.Sys.LookupIDs(ctx, t.Username); err != nil {
+	if t.UID == 0 {
+		if t.UID, t.GID, err = s.Sys.LookupIDs(ctx, t.Username); err != nil {
 			return nil, "", fmt.Errorf("Linux 用户不存在，无法修复：%w", err)
 		}
 	}
 	newPassword := ""
-	if _, err := os.Stat(s.Cfg.TenantConfigPath(t.Username)); errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(s.tenantConfigPath(t)); errors.Is(err, os.ErrNotExist) {
 		if newPassword, err = GeneratePassword(12); err != nil {
 			return nil, "", err
 		}
 	}
-	if err := s.writeTenantConfig(t.Username, t.Port, uid, gid, newPassword); err != nil {
+	if err := s.writeTenantConfig(t, newPassword); err != nil {
 		return nil, "", err
 	}
 	if err := s.writeUnit(ctx, t); err != nil {
@@ -522,6 +526,9 @@ func (s *Service) DeleteTenant(ctx context.Context, id int64, confirmName string
 	t, err := s.tenantByID(id)
 	if err != nil {
 		return nil, err
+	}
+	if domain.ProtectedUsername(t.Username) {
+		return nil, errors.New("root 是系统账号，不允许删除")
 	}
 	if strings.TrimSpace(confirmName) != t.Username {
 		return nil, errors.New("请完整输入登录名以确认删除")
@@ -648,12 +655,12 @@ func (s *Service) RestoreTenant(ctx context.Context, id int64, ac AuditContext) 
 	_ = s.Sys.Chown(ctx, t.HomeDir, t.UID, t.GID)
 
 	newPassword := ""
-	if _, err := os.Stat(s.Cfg.TenantConfigPath(t.Username)); errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(s.tenantConfigPath(t)); errors.Is(err, os.ErrNotExist) {
 		if newPassword, err = GeneratePassword(12); err != nil {
 			return nil, "", err
 		}
 	}
-	if err := s.writeTenantConfig(t.Username, t.Port, t.UID, t.GID, newPassword); err != nil {
+	if err := s.writeTenantConfig(t, newPassword); err != nil {
 		return nil, "", err
 	}
 	if err := s.writeUnit(ctx, t); err != nil {
@@ -698,6 +705,9 @@ func (s *Service) PurgeTenant(ctx context.Context, id int64, ac AuditContext) er
 	}
 	if t.Status != domain.StatusTrashed {
 		return errors.New("只能彻底删除回收站里的租户")
+	}
+	if domain.ProtectedUsername(t.Username) {
+		return errors.New("root 是系统账号，不允许删除")
 	}
 	unlock := s.lockTenant(t.Username)
 	defer unlock()

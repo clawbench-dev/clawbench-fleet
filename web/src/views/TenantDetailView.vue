@@ -313,7 +313,13 @@ function download(backup: Backup) {
           <button class="btn" type="button" :disabled="!!busy" @click="repair">
             <Wrench :size="15" /> 修复
           </button>
-          <button class="btn btn-danger" type="button" :disabled="!!busy" @click="deleteOpen = true">
+          <button
+            class="btn btn-danger"
+            type="button"
+            :disabled="!!busy || tenant.protected"
+            :title="tenant.protected ? 'root 是系统账号，不能删除' : ''"
+            @click="deleteOpen = true"
+          >
             <Trash2 :size="15" /> 删除
           </button>
         </div>
@@ -332,6 +338,11 @@ function download(backup: Backup) {
           <Trash2 :size="15" />
           这个租户在回收站，默认保留 30 天后自动清理。可以恢复，也可以立即强制删除（不可恢复）。
         </div>
+      </div>
+
+      <div v-if="tenant.protected && !trashed" class="row small muted-2" style="margin-top: 12px">
+        <AlertTriangle :size="15" />
+        root 是系统账号，平台只做启停和日常运维，不会删除它。
       </div>
 
       <div style="margin-top: 16px; max-width: 520px">

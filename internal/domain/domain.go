@@ -41,6 +41,10 @@ type Tenant struct {
 	TrashPath    string `json:"trash_path,omitempty"`
 }
 
+// ProtectedUsername reports whether an account must never be deleted. root
+// owns the machine itself, so removing it is never a valid operation.
+func ProtectedUsername(username string) bool { return username == "root" }
+
 // Address is what the admin copies and sends to the employee.
 func (t Tenant) Address(host string) string {
 	if host == "" {

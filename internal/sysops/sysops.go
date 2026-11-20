@@ -18,6 +18,16 @@ type Metrics struct {
 	PIDs        int
 }
 
+// UserInfo is one local account, used when scanning the machine for instances
+// that were created before the platform was installed.
+type UserInfo struct {
+	Username string
+	UID      int
+	GID      int
+	Home     string
+	Gecos    string
+}
+
 // System is the narrow slice of the operating system the platform needs.
 // Everything here is implemented twice: once with real commands (Real) and
 // once in memory (Fake) so the whole product can be exercised without root.
@@ -31,7 +41,13 @@ type System interface {
 	UsedUIDs(ctx context.Context) (map[int]bool, error)
 	Chown(ctx context.Context, path string, uid, gid int) error
 
+	// ListUsers enumerates local accounts. Adopting an existing instance
+	// starts from this list, not from the database.
+	ListUsers(ctx context.Context) ([]UserInfo, error)
+
 	WriteUnit(ctx context.Context, unit, content string) error
+	// ReadUnit returns an existing unit file, or "" when it does not exist.
+	ReadUnit(ctx context.Context, unit string) (string, error)
 	RemoveUnit(ctx context.Context, unit string) error
 	DaemonReload(ctx context.Context) error
 	Enable(ctx context.Context, unit string) error
@@ -40,6 +56,10 @@ type System interface {
 	Stop(ctx context.Context, unit string) error
 	Restart(ctx context.Context, unit string) error
 	IsActive(ctx context.Context, unit string) (bool, error)
+	// StopPortOwner terminates the process listening on port if (and only if)
+	// it runs as username. It is used when taking over an instance that was
+	// started by hand instead of by systemd.
+	StopPortOwner(ctx context.Context, port int, username string) error
 	Journal(ctx context.Context, unit string, lines int) (string, error)
 	Metrics(ctx context.Context, unit string) (Metrics, error)
 	DiskUsage(ctx context.Context, path string) (int64, error)
@@ -48,12 +68,12 @@ type System interface {
 	// NpmVersions lists the versions published for an npm package. registry is
 	// empty when the server's default registry should be used.
 	NpmVersions(ctx context.Context, pkg, registry string) ([]string, error)
-	// NpmInstall installs pkg@version into prefix, never into the global npm
-	// prefix, so several versions can be kept side by side.
-	NpmInstall(ctx context.Context, prefix, pkg, version, registry string) error
 	// NpmRegistry reports the registry npm would actually use, after the
 	// server's own .npmrc files are taken into account.
 	NpmRegistry(ctx context.Context) (string, error)
+	// NpmInstall installs pkg@version into prefix, never into the global npm
+	// prefix, so several versions can be kept side by side.
+	NpmInstall(ctx context.Context, prefix, pkg, version, registry string) error
 }
 
 // NpmPlatformPackage maps a wrapper package such as "@scope/clawbench" to the

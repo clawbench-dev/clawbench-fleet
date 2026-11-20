@@ -5,12 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -121,9 +124,127 @@ func (r *Real) UsedUIDs(ctx context.Context) (map[int]bool, error) {
 	return out, nil
 }
 
+var ssPidRe = regexp.MustCompile(`pid=(\d+)`)
+
+// StopPortOwner stops whatever is listening on port, but only when every
+// process behind that socket belongs to username. Anything else is reported
+// instead of killed: the platform must never take down a stranger's process.
+func (r *Real) StopPortOwner(ctx context.Context, port int, username string) error {
+	uid, _, err := r.LookupIDs(ctx, username)
+	if err != nil {
+		return err
+	}
+	out, err := run(ctx, "ss", "-ltnp", fmt.Sprintf("sport = :%d", port))
+	if err != nil {
+		return err
+	}
+	pids := map[int]bool{}
+	for _, m := range ssPidRe.FindAllStringSubmatch(out, -1) {
+		if pid, err := strconv.Atoi(m[1]); err == nil {
+			pids[pid] = true
+		}
+	}
+	if len(pids) == 0 {
+		return fmt.Errorf("端口 %d 上有进程在监听，但查不到它的进程号，请手动停止", port)
+	}
+	for pid := range pids {
+		if !processOwnedBy(pid, uid) {
+			return fmt.Errorf("端口 %d 被其他账号的进程占用（PID %d），平台不会去停它", port, pid)
+		}
+	}
+	for pid := range pids {
+		_ = syscall.Kill(pid, syscall.SIGTERM)
+	}
+	for i := 0; i < 50; i++ {
+		if !portOpen(port) {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+	for pid := range pids {
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+	}
+	for i := 0; i < 25; i++ {
+		if !portOpen(port) {
+			return nil
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return fmt.Errorf("端口 %d 上的进程停不下来", port)
+}
+
+func processOwnedBy(pid, uid int) bool {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, "Uid:") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			return false
+		}
+		real, err := strconv.Atoi(fields[1])
+		return err == nil && real == uid
+	}
+	return false
+}
+
+func portOpen(port int) bool {
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 300*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
 func (r *Real) Chown(ctx context.Context, path string, uid, gid int) error {
 	_, err := run(ctx, "chown", "-R", fmt.Sprintf("%d:%d", uid, gid), path)
 	return err
+}
+
+func (r *Real) ListUsers(ctx context.Context) ([]UserInfo, error) {
+	data, err := os.ReadFile("/etc/passwd")
+	if err != nil {
+		return nil, err
+	}
+	var out []UserInfo
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Split(line, ":")
+		if len(fields) < 7 {
+			continue
+		}
+		uid, err := strconv.Atoi(fields[2])
+		if err != nil {
+			continue
+		}
+		gid, err := strconv.Atoi(fields[3])
+		if err != nil {
+			continue
+		}
+		out = append(out, UserInfo{
+			Username: fields[0], UID: uid, GID: gid, Home: fields[5], Gecos: fields[4],
+		})
+	}
+	return out, nil
+}
+
+func (r *Real) ReadUnit(ctx context.Context, unit string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(r.systemdDir, unit))
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
 }
 
 func (r *Real) WriteUnit(ctx context.Context, unit, content string) error {

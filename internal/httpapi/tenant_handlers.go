@@ -28,6 +28,30 @@ func (s *Server) handleListTenants(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleScanTenants(w http.ResponseWriter, r *http.Request) {
+	items, err := s.svc.ScanAdoptable(r.Context())
+	if err != nil {
+		writeServiceErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "mode": s.svc.Sys.Mode()})
+}
+
+func (s *Server) handleAdoptTenants(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Usernames []string `json:"usernames"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	items, err := s.svc.AdoptTenants(r.Context(), body.Usernames, auditCtx(r))
+	if err != nil {
+		writeServiceErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
 func (s *Server) handleCreateTenant(w http.ResponseWriter, r *http.Request) {
 	var in fleet.CreateTenantInput
 	if !decodeJSON(w, r, &in) {

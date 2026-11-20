@@ -59,6 +59,7 @@ export function actionLabel(action: string): string {
     'tenant.update': '修改配置',
     'tenant.logs': '查看日志',
     'tenant.import': '批量导入',
+    'tenant.adopt': '纳入已有实例',
     'tenant.restore': '恢复租户',
     'tenant.purge': '强制删除',
     'backup.create': '创建备份',

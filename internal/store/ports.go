@@ -155,6 +155,37 @@ func (s *Store) PortsForTenant(tenantID int64) ([]int, error) {
 	return out, rows.Err()
 }
 
+// ClaimPort attaches a specific port to tenantID. Adopted tenants already have
+// a port chosen by their existing instance, so the allocator is not used; a
+// port owned by another tenant is never stolen.
+func (s *Store) ClaimPort(port int, tenantID int64) error {
+	if port < 1 || port > 65535 {
+		return fmt.Errorf("invalid port %d", port)
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var owner int64
+	err = tx.QueryRow(`SELECT COALESCE(tenant_id, 0) FROM ports WHERE port=?`, port).Scan(&owner)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		// Port outside the configured range; record it on demand.
+	case err != nil:
+		return err
+	case owner != 0 && owner != tenantID:
+		return fmt.Errorf("端口 %d 已经被其他租户占用", port)
+	}
+	if _, err := tx.Exec(`INSERT INTO ports(port, tenant_id, state, updated_at) VALUES(?,?,'allocated',?)
+		ON CONFLICT(port) DO UPDATE SET tenant_id=excluded.tenant_id, state='allocated', updated_at=excluded.updated_at`,
+		port, tenantID, now()); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *Store) PortState(port int) (string, error) {
 	var state string
 	err := s.db.QueryRow(`SELECT state FROM ports WHERE port=?`, port).Scan(&state)

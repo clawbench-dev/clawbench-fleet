@@ -57,6 +57,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/overview", s.protected(s.handleOverview))
 
 	s.mux.HandleFunc("GET /api/tenants", s.protected(s.handleListTenants))
+	s.mux.HandleFunc("GET /api/tenants/scan", s.protected(s.handleScanTenants))
+	s.mux.HandleFunc("POST /api/tenants/adopt", s.protected(s.handleAdoptTenants))
 	s.mux.HandleFunc("POST /api/tenants", s.protected(s.handleCreateTenant))
 	s.mux.HandleFunc("POST /api/tenants/bulk", s.protected(s.handleBulk))
 	s.mux.HandleFunc("POST /api/tenants/import/preview", s.protected(s.handleImportPreview))

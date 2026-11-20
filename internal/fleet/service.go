@@ -326,8 +326,8 @@ func HashPassword(password string) string {
 
 // --- tenant config ---
 
-func (s *Service) writeTenantConfig(username string, port, uid, gid int, password string) error {
-	path := s.Cfg.TenantConfigPath(username)
+func (s *Service) writeTenantConfig(t *domain.Tenant, password string) error {
+	path := s.tenantConfigPath(t)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
@@ -335,7 +335,7 @@ func (s *Service) writeTenantConfig(username string, port, uid, gid int, passwor
 	if data, err := os.ReadFile(path); err == nil {
 		_ = yamlUnmarshal(data, &cfg)
 	}
-	cfg["port"] = port
+	cfg["port"] = t.Port
 	cfg["host"] = "0.0.0.0"
 	if password != "" {
 		cfg["password"] = HashPassword(password)
@@ -369,10 +369,17 @@ func (s *Service) writeTenantConfig(username string, port, uid, gid int, passwor
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if uid > 0 {
-		_ = os.Chown(tmpName, uid, gid)
+	if t.UID > 0 {
+		_ = os.Chown(tmpName, t.UID, t.GID)
 	}
 	return os.Rename(tmpName, path)
+}
+
+// tenantConfigPath follows the tenant record rather than the configured home
+// root, so adopted tenants keep working even when their home is /root or an
+// older location.
+func (s *Service) tenantConfigPath(t *domain.Tenant) string {
+	return filepath.Join(t.DataDir, "config", "config.yaml")
 }
 
 // --- health ---

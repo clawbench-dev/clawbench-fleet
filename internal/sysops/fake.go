@@ -141,6 +141,61 @@ func (f *Fake) Chown(ctx context.Context, path string, uid, gid int) error {
 	return nil
 }
 
+// ListUsers enumerates the simulated homes directory. Users restored from a
+// previous dev run have no UID in memory, so they get a stable placeholder.
+func (f *Fake) ListUsers(ctx context.Context) ([]UserInfo, error) {
+	entries, err := os.ReadDir(filepath.Join(f.BaseDir, "homes"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	f.mu.Lock()
+	known := make(map[string]int, len(f.users))
+	for name, uid := range f.users {
+		known[name] = uid
+	}
+	f.mu.Unlock()
+
+	var out []UserInfo
+	for i, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		uid, ok := known[name]
+		if !ok {
+			uid = 3000 + i
+		}
+		out = append(out, UserInfo{
+			Username: name,
+			UID:      uid,
+			GID:      uid,
+			Home:     filepath.Join(f.BaseDir, "homes", name),
+		})
+	}
+	return out, nil
+}
+
+func (f *Fake) ReadUnit(ctx context.Context, unit string) (string, error) {
+	f.mu.Lock()
+	u, ok := f.units[unit]
+	f.mu.Unlock()
+	if ok {
+		return u.content, nil
+	}
+	data, err := os.ReadFile(filepath.Join(f.BaseDir, "units", unit))
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	return string(data), err
+}
+
+func (f *Fake) StopPortOwner(ctx context.Context, port int, username string) error {
+	return nil
+}
+
 func (f *Fake) WriteUnit(ctx context.Context, unit, content string) error {
 	port := 0
 	if m := fakePortRe.FindStringSubmatch(content); len(m) == 2 {

@@ -41,6 +41,37 @@ export interface Tenant {
   trash_path?: string
   address: string
   metrics: Metrics
+  protected: boolean
+}
+
+export interface AdoptCandidate {
+  username: string
+  display_name: string
+  uid: number
+  gid: number
+  home_dir: string
+  data_dir: string
+  port: number
+  unit_name: string
+  unit_exists: boolean
+  service_active: boolean
+  health_ok: boolean
+  version: string
+  cpu_quota: string
+  memory_max: string
+  tasks_max: number
+  already_managed: boolean
+  protected: boolean
+  status: string
+  blocked: string
+  warnings: string[]
+}
+
+export interface AdoptResult {
+  username: string
+  tenant_id?: number
+  status: string
+  error: string
 }
 
 export interface HostStats {
