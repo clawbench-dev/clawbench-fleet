@@ -193,7 +193,36 @@ func (f *Fake) ReadUnit(ctx context.Context, unit string) (string, error) {
 }
 
 func (f *Fake) StopPortOwner(ctx context.Context, port int, username string) error {
+	f.mu.Lock()
+	var targets []string
+	for name, u := range f.units {
+		if u.port == port && u.username == username && u.server != nil {
+			targets = append(targets, name)
+		}
+	}
+	f.mu.Unlock()
+	for _, name := range targets {
+		_ = f.Stop(ctx, name)
+	}
 	return nil
+}
+
+func (f *Fake) Listeners(ctx context.Context) ([]Listener, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []Listener
+	for _, u := range f.units {
+		if u.server == nil || u.port == 0 || u.username == "" {
+			continue
+		}
+		out = append(out, Listener{
+			Username: u.username,
+			Port:     u.port,
+			Command:  u.content,
+			Home:     filepath.Join(f.BaseDir, "homes", u.username),
+		})
+	}
+	return out, nil
 }
 
 func (f *Fake) WriteUnit(ctx context.Context, unit, content string) error {

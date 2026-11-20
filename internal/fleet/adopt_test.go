@@ -190,3 +190,110 @@ func TestRootIsProtected(t *testing.T) {
 		t.Fatalf("root should still be stoppable: %v", err)
 	}
 }
+
+// A Clawbench started with --port does not write that port back to
+// config.yaml, so the scan has to trust the listening socket instead of the
+// file. This reproduces the "all ports look like 21000" report.
+func TestScanUsesActualListeningPort(t *testing.T) {
+	svc, cfg := newTestService(t)
+	ctx := context.Background()
+	port := freePort(t)
+	home := seedExistingInstance(t, svc, cfg, "alice", 5001, 21000)
+
+	// An older setup started the instance by hand under its own unit name.
+	unit := "clawbench-legacy.service"
+	content := fmt.Sprintf("[Service]\nUser=alice\nExecStart=/opt/clawbench/current/clawbench --port %d --data-dir %s/.clawbench\n", port, home)
+	if err := svc.Sys.WriteUnit(ctx, unit, content); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Sys.Start(ctx, unit); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = svc.Sys.Stop(context.Background(), unit) })
+
+	items, err := svc.ScanAdoptable(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("candidates = %+v", items)
+	}
+	c := items[0]
+	if c.Port != port {
+		t.Fatalf("port = %d, want the listening port %d (config said 21000)", c.Port, port)
+	}
+	if c.PortSource != "运行中的进程" {
+		t.Fatalf("port source = %q", c.PortSource)
+	}
+	if !c.HealthOK || !c.ServiceActive {
+		t.Fatalf("live instance not detected: %+v", c)
+	}
+	if c.UnitExists {
+		t.Fatal("the standard unit does not exist yet")
+	}
+
+	results, err := svc.AdoptTenants(ctx, []string{"alice"}, AuditContext{Actor: "tester"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].Error != "" {
+		t.Fatalf("adopt failed: %+v", results)
+	}
+	tenant, err := svc.Store.GetTenantByUsername("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tenant.Port != port {
+		t.Fatalf("adopted port = %d, want %d", tenant.Port, port)
+	}
+	// The config is rewritten with the real port so a later restart without
+	// the flag still binds the right socket.
+	raw, err := os.ReadFile(filepath.Join(tenant.DataDir, "config", "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), fmt.Sprintf("port: %d", port)) {
+		t.Fatalf("config not updated with the real port: %s", raw)
+	}
+	if !strings.Contains(string(raw), "sha256:keepme") {
+		t.Fatalf("password lost: %s", raw)
+	}
+}
+
+// A running instance also opens sockets for port forwarding. The main port is
+// the one recorded in config.yaml, so the scan must not pick a forwarding
+// socket just because it happens to be listed first.
+func TestScanPrefersConfigPortOverForwardingPort(t *testing.T) {
+	svc, cfg := newTestService(t)
+	ctx := context.Background()
+	main := freePort(t)
+	fwd := freePort(t)
+	for fwd == main {
+		fwd = freePort(t)
+	}
+	home := seedExistingInstance(t, svc, cfg, "alice", 5001, main)
+
+	for i, port := range []int{fwd, main} { // forwarding socket listed first
+		unit := fmt.Sprintf("clawbench-legacy-%d.service", i)
+		content := fmt.Sprintf("[Service]\nUser=alice\nExecStart=/opt/clawbench/current/clawbench --port %d --data-dir %s/.clawbench\n", port, home)
+		if err := svc.Sys.WriteUnit(ctx, unit, content); err != nil {
+			t.Fatal(err)
+		}
+		if err := svc.Sys.Start(ctx, unit); err != nil {
+			t.Fatal(err)
+		}
+		name := unit
+		t.Cleanup(func() { _ = svc.Sys.Stop(context.Background(), name) })
+	}
+
+	items, err := svc.ScanAdoptable(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("candidates = %+v", items)
+	}
+	if items[0].Port != main {
+		t.Fatalf("port = %d, want the main port %d (forwarding port was %d)", items[0].Port, main, fwd)
+	}
+}

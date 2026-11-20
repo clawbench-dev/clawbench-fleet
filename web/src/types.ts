@@ -52,8 +52,10 @@ export interface AdoptCandidate {
   home_dir: string
   data_dir: string
   port: number
+  port_source: string
   unit_name: string
   unit_exists: boolean
+  unit_active: boolean
   service_active: boolean
   health_ok: boolean
   version: string

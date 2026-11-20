@@ -371,7 +371,10 @@ function scanStatus(c: AdoptCandidate) {
                 <span v-if="c.protected" class="badge badge-neutral" style="margin-left: 6px">系统账号</span>
                 <div class="small muted-2">{{ c.home_dir }}</div>
               </td>
-              <td class="mono small">{{ c.port || '—' }}</td>
+              <td>
+                <span class="mono small">{{ c.port || '—' }}</span>
+                <div v-if="c.port" class="small muted-2">{{ c.port_source }}</div>
+              </td>
               <td class="small">{{ scanStatus(c) }}</td>
               <td class="mono small">{{ c.version || '—' }}</td>
               <td class="small">

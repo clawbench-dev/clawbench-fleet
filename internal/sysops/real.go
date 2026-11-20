@@ -247,6 +247,97 @@ func (r *Real) ReadUnit(ctx context.Context, unit string) (string, error) {
 	return string(data), nil
 }
 
+// Listeners reads the listening TCP sockets once and enriches each with the
+// owning account and command line. ss prints one line per address family, so
+// a process bound to both 0.0.0.0 and :: shows up twice for the same port.
+func (r *Real) Listeners(ctx context.Context) ([]Listener, error) {
+	out, err := run(ctx, "ss", "-ltnpH")
+	if err != nil {
+		return nil, err
+	}
+	users, err := r.ListUsers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	nameByUID := map[int]string{}
+	for _, u := range users {
+		nameByUID[u.UID] = u.Username
+	}
+
+	seen := map[[2]int]bool{}
+	var res []Listener
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 5 || fields[0] != "LISTEN" {
+			continue
+		}
+		port := portFromAddr(fields[3])
+		if port == 0 {
+			continue
+		}
+		for _, m := range ssPidRe.FindAllStringSubmatch(strings.Join(fields[4:], " "), -1) {
+			pid, err := strconv.Atoi(m[1])
+			if err != nil || pid <= 0 {
+				continue
+			}
+			key := [2]int{pid, port}
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			uid, command, home, cwd := processDetails(pid)
+			res = append(res, Listener{
+				Username: nameByUID[uid],
+				PID:      pid,
+				Port:     port,
+				Command:  command,
+				Home:     home,
+				Cwd:      cwd,
+			})
+		}
+	}
+	return res, nil
+}
+
+func portFromAddr(addr string) int {
+	if i := strings.LastIndexByte(addr, ':'); i >= 0 {
+		if port, err := strconv.Atoi(addr[i+1:]); err == nil {
+			return port
+		}
+	}
+	return 0
+}
+
+func processDetails(pid int) (int, string, string, string) {
+	uid := -1
+	if data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid)); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			if !strings.HasPrefix(line, "Uid:") {
+				continue
+			}
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				uid, _ = strconv.Atoi(fields[1])
+			}
+			break
+		}
+	}
+	command, home := "", ""
+	if data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid)); err == nil {
+		command = strings.TrimSpace(strings.ReplaceAll(string(data), "\x00", " "))
+	}
+	if data, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", pid)); err == nil {
+		for _, part := range strings.Split(string(data), "\x00") {
+			if strings.HasPrefix(part, "HOME=") {
+				home = strings.TrimPrefix(part, "HOME=")
+				break
+			}
+		}
+	}
+	cwd, _ := os.Readlink(fmt.Sprintf("/proc/%d/cwd", pid))
+	return uid, command, home, cwd
+}
+
 func (r *Real) WriteUnit(ctx context.Context, unit, content string) error {
 	return os.WriteFile(filepath.Join(r.systemdDir, unit), []byte(content), 0o644)
 }

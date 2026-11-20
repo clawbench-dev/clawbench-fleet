@@ -28,6 +28,20 @@ type UserInfo struct {
 	Gecos    string
 }
 
+// Listener is one process listening on a TCP port. Clawbench instances started
+// with --port do not write that port back to config.yaml, so the socket is the
+// only reliable source for the port an existing instance actually uses.
+type Listener struct {
+	Username string
+	PID      int
+	Port     int
+	Command  string
+	// Home and Cwd help infer the data directory when the process was started
+	// without an explicit --data-dir.
+	Home string
+	Cwd  string
+}
+
 // System is the narrow slice of the operating system the platform needs.
 // Everything here is implemented twice: once with real commands (Real) and
 // once in memory (Fake) so the whole product can be exercised without root.
@@ -44,6 +58,9 @@ type System interface {
 	// ListUsers enumerates local accounts. Adopting an existing instance
 	// starts from this list, not from the database.
 	ListUsers(ctx context.Context) ([]UserInfo, error)
+	// Listeners enumerates TCP sockets that are currently listening, with the
+	// owning account and command line.
+	Listeners(ctx context.Context) ([]Listener, error)
 
 	WriteUnit(ctx context.Context, unit, content string) error
 	// ReadUnit returns an existing unit file, or "" when it does not exist.

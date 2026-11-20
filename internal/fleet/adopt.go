@@ -28,8 +28,10 @@ type AdoptCandidate struct {
 	HomeDir        string   `json:"home_dir"`
 	DataDir        string   `json:"data_dir"`
 	Port           int      `json:"port"`
+	PortSource     string   `json:"port_source"`
 	UnitName       string   `json:"unit_name"`
 	UnitExists     bool     `json:"unit_exists"`
+	UnitActive     bool     `json:"unit_active"`
 	ServiceActive  bool     `json:"service_active"`
 	HealthOK       bool     `json:"health_ok"`
 	Version        string   `json:"version"`
@@ -51,28 +53,35 @@ type AdoptResult struct {
 }
 
 var (
-	unitPortRe  = regexp.MustCompile(`--port\s+(\d+)`)
-	unitDataRe  = regexp.MustCompile(`--data-dir\s+(\S+)`)
+	unitPortRe  = regexp.MustCompile(`--port[=\s]+(\d+)`)
+	unitDataRe  = regexp.MustCompile(`--data-dir[=\s]+(\S+)`)
 	unitCPURe   = regexp.MustCompile(`(?m)^CPUQuota=(\S+)`)
 	unitMemRe   = regexp.MustCompile(`(?m)^MemoryMax=(\S+)`)
 	unitTasksRe = regexp.MustCompile(`(?m)^TasksMax=(\d+)`)
 )
 
+type scanEnv struct {
+	users     []sysops.UserInfo
+	unitSet   map[string]bool
+	managed   map[string]bool
+	listeners map[string][]sysops.Listener
+}
+
 // ScanAdoptable lists local accounts that already own a Clawbench data
 // directory. Nothing is written: the admin reviews the list and then adopts
 // what they choose.
 func (s *Service) ScanAdoptable(ctx context.Context) ([]AdoptCandidate, error) {
-	users, unitSet, managed, err := s.scanInputs(ctx)
+	env, err := s.loadScanEnv(ctx)
 	if err != nil {
 		return nil, err
 	}
-	cands := make([]AdoptCandidate, 0, len(users))
-	for _, u := range users {
-		if c, ok := s.inspectUser(ctx, u, unitSet, managed); ok {
+	cands := make([]AdoptCandidate, 0, len(env.users))
+	for _, u := range env.users {
+		if c, ok := s.inspectUser(ctx, env, u); ok {
 			cands = append(cands, c)
 		}
 	}
-	s.enrichCandidates(ctx, cands)
+	s.enrichCandidates(ctx, env, cands)
 	sort.Slice(cands, func(i, j int) bool {
 		if cands[i].AlreadyManaged != cands[j].AlreadyManaged {
 			return !cands[i].AlreadyManaged
@@ -107,31 +116,42 @@ func (s *Service) AdoptTenants(ctx context.Context, usernames []string, ac Audit
 	return results, nil
 }
 
-func (s *Service) scanInputs(ctx context.Context) ([]sysops.UserInfo, map[string]bool, map[string]bool, error) {
+func (s *Service) loadScanEnv(ctx context.Context) (*scanEnv, error) {
 	users, err := s.Sys.ListUsers(ctx)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("读取系统用户失败：%w", err)
+		return nil, fmt.Errorf("读取系统用户失败：%w", err)
 	}
-	units, err := s.Sys.ListUnits(ctx)
-	if err != nil {
-		units = nil
+	env := &scanEnv{
+		users:     users,
+		unitSet:   map[string]bool{},
+		managed:   map[string]bool{},
+		listeners: map[string][]sysops.Listener{},
 	}
-	unitSet := make(map[string]bool, len(units))
-	for _, u := range units {
-		unitSet[u] = true
-	}
-	managed := map[string]bool{}
-	if all, err := s.allTenants(); err == nil {
-		for _, t := range all {
-			managed[t.Username] = true
+	if units, err := s.Sys.ListUnits(ctx); err == nil {
+		for _, u := range units {
+			env.unitSet[u] = true
 		}
 	}
-	return users, unitSet, managed, nil
+	if all, err := s.allTenants(); err == nil {
+		for _, t := range all {
+			env.managed[t.Username] = true
+		}
+	}
+	// Listening sockets are optional: without ss the scan still works, it just
+	// falls back to the unit or config file for the port.
+	if listeners, err := s.Sys.Listeners(ctx); err == nil {
+		for _, l := range listeners {
+			if l.Username != "" {
+				env.listeners[l.Username] = append(env.listeners[l.Username], l)
+			}
+		}
+	}
+	return env, nil
 }
 
 // inspectUser turns one account into a candidate. ok is false for accounts
 // that are not tenants at all (no data directory, system accounts, ...).
-func (s *Service) inspectUser(ctx context.Context, u sysops.UserInfo, unitSet, managed map[string]bool) (AdoptCandidate, bool) {
+func (s *Service) inspectUser(ctx context.Context, env *scanEnv, u sysops.UserInfo) (AdoptCandidate, bool) {
 	if u.Username == "" || u.Username == "clawbench-fleet" {
 		return AdoptCandidate{}, false
 	}
@@ -145,11 +165,11 @@ func (s *Service) inspectUser(ctx context.Context, u sysops.UserInfo, unitSet, m
 		GID:            u.GID,
 		HomeDir:        u.Home,
 		UnitName:       s.Cfg.UnitName(u.Username),
-		AlreadyManaged: managed[u.Username],
+		AlreadyManaged: env.managed[u.Username],
 		Protected:      domain.ProtectedUsername(u.Username),
 	}
 	var unitContent string
-	if unitSet[c.UnitName] {
+	if env.unitSet[c.UnitName] {
 		c.UnitExists = true
 		unitContent, _ = s.Sys.ReadUnit(ctx, c.UnitName)
 	}
@@ -157,16 +177,27 @@ func (s *Service) inspectUser(ctx context.Context, u sysops.UserInfo, unitSet, m
 	if m := unitDataRe.FindStringSubmatch(unitContent); len(m) == 2 {
 		c.DataDir = m[1]
 	}
-	info, err := os.Stat(c.DataDir)
-	if err != nil || !info.IsDir() {
+	dirs := listenerDataDirs(env.listeners[u.Username])
+	if !dirExists(c.DataDir) && len(dirs) > 0 {
+		// An instance started with --data-dir outside the home directory is
+		// still a tenant; fall back to the directory it is running from.
+		c.DataDir = dirs[0]
+	}
+	if !dirExists(c.DataDir) {
 		return AdoptCandidate{}, false
 	}
+	if len(dirs) > 1 {
+		c.Warnings = append(c.Warnings, fmt.Sprintf("这个用户同时跑了多个实例（%d 个数据目录），平台按 %s 纳管", len(dirs), c.DataDir))
+	}
 
-	c.Port = readConfigPort(filepath.Join(c.DataDir, "config", "config.yaml"))
-	if c.Port == 0 {
-		if m := unitPortRe.FindStringSubmatch(unitContent); len(m) == 2 {
-			c.Port, _ = strconv.Atoi(m[1])
-		}
+	// An existing systemd unit states the port the instance was started with;
+	// the config file is the fallback for instances without a unit.
+	c.PortSource = "配置文件"
+	if m := unitPortRe.FindStringSubmatch(unitContent); len(m) == 2 {
+		c.Port, _ = strconv.Atoi(m[1])
+		c.PortSource = "systemd 单元"
+	} else if port := readConfigPort(filepath.Join(c.DataDir, "config", "config.yaml")); port > 0 {
+		c.Port = port
 	}
 	if m := unitCPURe.FindStringSubmatch(unitContent); len(m) == 2 && cpuQuotaRe.MatchString(m[1]) {
 		c.CPUQuota = m[1]
@@ -177,14 +208,132 @@ func (s *Service) inspectUser(ctx context.Context, u sysops.UserInfo, unitSet, m
 	if m := unitTasksRe.FindStringSubmatch(unitContent); len(m) == 2 {
 		c.TasksMax, _ = strconv.Atoi(m[1])
 	}
+	return c, true
+}
 
-	if c.AlreadyManaged {
+// enrichCandidates finds the instance that is actually running for each
+// account, fills in health and version, then decides what can be adopted.
+// Health checks are I/O bound, so they run a few at a time.
+func (s *Service) enrichCandidates(ctx context.Context, env *scanEnv, cands []AdoptCandidate) {
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 6)
+	for i := range cands {
+		c := &cands[i]
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			cctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+			defer cancel()
+			if active, err := s.Sys.IsActive(cctx, c.UnitName); err == nil {
+				c.UnitActive = active
+			}
+
+			// The socket is the truth: a manually started instance may listen
+			// on a port that neither the config file nor a unit mentions.
+			if live, count := s.findLiveInstance(cctx, env.listeners[c.Username], c.DataDir, c.Port); live != nil {
+				c.Port = live.port
+				c.PortSource = "运行中的进程"
+				c.HealthOK = live.httpOK
+				c.ServiceActive = true
+				c.Version = live.version
+				if count > 1 {
+					c.Warnings = append(c.Warnings, fmt.Sprintf("这个数据目录有 %d 个进程在监听，平台按端口 %d 纳管", count, live.port))
+				}
+			} else if c.Port > 0 {
+				if info, err := s.healthCheck(cctx, c.Port); err == nil {
+					c.HealthOK = true
+					c.Version = info.Version
+				}
+			}
+
+			switch {
+			case c.HealthOK:
+				c.Status = domain.StatusRunning
+			case c.UnitActive:
+				c.Status = domain.StatusError
+			default:
+				c.Status = domain.StatusStopped
+			}
+			s.finalizeCandidate(c)
+		}()
+	}
+	wg.Wait()
+}
+
+type liveInstance struct {
+	port    int
+	dataDir string
+	version string
+	httpOK  bool
+}
+
+// findLiveInstance picks the listening socket that belongs to this tenant.
+// A user may run several Clawbench instances (one per data directory), so the
+// data directory inferred from the command line is the signal; the returned
+// count is how many sockets point at the same directory.
+// findLiveInstance picks the listening socket that belongs to this tenant.
+// A user may run several Clawbench instances (one per data directory), so the
+// data directory inferred from the command line is the signal. An instance
+// also opens extra sockets for port forwarding, so the port from the config or
+// unit wins when one of the sockets matches it.
+func (s *Service) findLiveInstance(ctx context.Context, listeners []sysops.Listener, preferDir string, preferPort int) (*liveInstance, int) {
+	var first *liveInstance
+	pids := map[int]bool{}
+	checked := 0
+	for _, l := range listeners {
+		if l.Port < 1 || checked >= 8 {
+			continue
+		}
+		dir := listenerDataDir(l)
+		if dir == "" || filepath.Clean(dir) != filepath.Clean(preferDir) {
+			continue
+		}
+		key := l.PID
+		if key <= 0 {
+			key = -l.Port
+		}
+		pids[key] = true
+
+		// The main port is the identity even when it does not answer plain
+		// HTTP (an instance with TLS enabled, for example). Extra sockets are
+		// only used when no main port is known.
+		if preferPort > 0 && l.Port == preferPort {
+			live := &liveInstance{port: l.Port, dataDir: dir}
+			if info, err := s.healthCheck(ctx, l.Port); err == nil {
+				live.version = info.Version
+				live.httpOK = true
+			}
+			return live, len(pids)
+		}
+
+		checked++
+		info, err := s.healthCheck(ctx, l.Port)
+		if err != nil {
+			continue
+		}
+		if first == nil {
+			first = &liveInstance{port: l.Port, dataDir: dir, version: info.Version, httpOK: true}
+		}
+	}
+	return first, len(pids)
+}
+
+func (s *Service) finalizeCandidate(c *AdoptCandidate) {
+	switch {
+	case c.AlreadyManaged:
 		c.Blocked = "已经在管理列表里"
-	} else if c.Port == 0 {
-		c.Blocked = "找不到端口：数据目录里没有配置端口，也没有可用的 systemd 单元"
-	} else if st, err := s.Store.PortState(c.Port); err == nil && (st == "allocated" || st == "reserved") {
+	case c.Port == 0:
+		c.Blocked = "找不到端口：进程没在跑，配置文件和 systemd 单元里也没有端口"
+	case !configExists(c.DataDir):
+		c.Blocked = "数据目录里没有 config.yaml，纳管会丢掉原有密码，暂不纳管"
+	case s.portTaken(c.Port):
 		c.Blocked = fmt.Sprintf("端口 %d 已经被其他租户占用", c.Port)
-	} else if !s.clawbenchBinaryReady() {
+	case c.ServiceActive && !c.HealthOK:
+		c.Blocked = fmt.Sprintf("端口 %d 上的实例没响应 HTTP 健康检查（可能启用了 HTTPS 或还没启动完），平台按 HTTP 管理，暂不纳管", c.Port)
+	case !s.clawbenchBinaryReady():
 		c.Blocked = "平台还没有安装可用的 Clawbench 版本，请先到升级中心安装再纳管"
 	}
 	if c.Protected {
@@ -199,50 +348,77 @@ func (s *Service) inspectUser(ctx context.Context, u sysops.UserInfo, unitSet, m
 	if !c.UnitExists {
 		c.Warnings = append(c.Warnings, "没有 systemd 单元，纳入时会新建并启动")
 	}
-	return c, true
+	if c.ServiceActive && !c.UnitExists {
+		c.Warnings = append(c.Warnings, "实例是手动启动的，纳入时会先停掉它再交给 systemd")
+	}
+	if !c.HealthOK && !c.ServiceActive && c.Port > 0 && portListening(c.Port) {
+		c.Warnings = append(c.Warnings, fmt.Sprintf("端口 %d 有程序在监听，但不是 Clawbench", c.Port))
+	}
+	if c.PortSource == "配置文件" && !c.HealthOK {
+		c.Warnings = append(c.Warnings, "实例没在运行，端口取自配置文件，可能和它启动时实际用的端口不一致")
+	}
 }
 
-// enrichCandidates fills in live state (service active, health, version).
-// Health checks are I/O bound, so they run a few at a time.
-func (s *Service) enrichCandidates(ctx context.Context, cands []AdoptCandidate) {
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, 6)
-	for i := range cands {
-		c := &cands[i]
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
+func (s *Service) portTaken(port int) bool {
+	st, err := s.Store.PortState(port)
+	return err == nil && (st == "allocated" || st == "reserved")
+}
 
-			cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			defer cancel()
-			if active, err := s.Sys.IsActive(cctx, c.UnitName); err == nil {
-				c.ServiceActive = active
-			}
-			if c.Port > 0 {
-				if info, err := s.healthCheck(cctx, c.Port); err == nil {
-					c.HealthOK = true
-					c.Version = info.Version
-				}
-			}
-			switch {
-			case c.HealthOK:
-				c.Status = domain.StatusRunning
-			case c.ServiceActive:
-				c.Status = domain.StatusError
-			default:
-				c.Status = domain.StatusStopped
-			}
-			if !c.HealthOK && c.Port > 0 && portListening(c.Port) {
-				c.Warnings = append(c.Warnings, fmt.Sprintf("端口 %d 有程序在监听，但不是 Clawbench", c.Port))
-			}
-			if !c.UnitExists && c.HealthOK {
-				c.Warnings = append(c.Warnings, "实例是手动启动的，纳入时会先停掉它再交给 systemd")
-			}
-		}()
+func configExists(dataDir string) bool {
+	_, err := os.Stat(filepath.Join(dataDir, "config", "config.yaml"))
+	return err == nil
+}
+
+// listenerDataDirs returns the distinct data directories used by a user's
+// listening Clawbench processes.
+func listenerDataDirs(listeners []sysops.Listener) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, l := range listeners {
+		dir := listenerDataDir(l)
+		if dir == "" || seen[dir] {
+			continue
+		}
+		seen[dir] = true
+		out = append(out, dir)
 	}
-	wg.Wait()
+	return out
+}
+
+// listenerDataDir infers the data directory of a listening process. An
+// explicit --data-dir wins; a plain `clawbench` started from a shell or a unit
+// uses $HOME/.clawbench.
+func listenerDataDir(l sysops.Listener) string {
+	if dir := dataDirFromCmd(l.Command); dir != "" {
+		return filepath.Clean(dir)
+	}
+	if !isClawbenchCommand(l.Command) {
+		return ""
+	}
+	if l.Home != "" {
+		return filepath.Clean(filepath.Join(l.Home, ".clawbench"))
+	}
+	if l.Cwd != "" {
+		return filepath.Clean(filepath.Join(l.Cwd, ".clawbench"))
+	}
+	return ""
+}
+
+func isClawbenchCommand(command string) bool {
+	lower := strings.ToLower(command)
+	return strings.Contains(lower, "clawbench") && !strings.Contains(lower, "clawbench-fleet")
+}
+
+func dirExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
+func dataDirFromCmd(command string) string {
+	if m := unitDataRe.FindStringSubmatch(command); len(m) == 2 {
+		return m[1]
+	}
+	return ""
 }
 
 func (s *Service) adoptOne(ctx context.Context, username string, ac AuditContext) AdoptResult {
@@ -254,15 +430,15 @@ func (s *Service) adoptOne(ctx context.Context, username string, ac AuditContext
 		res.Error = "已经在管理列表里"
 		return res
 	}
-	users, unitSet, managed, err := s.scanInputs(ctx)
+	env, err := s.loadScanEnv(ctx)
 	if err != nil {
 		res.Error = err.Error()
 		return res
 	}
 	var target *sysops.UserInfo
-	for i := range users {
-		if users[i].Username == username {
-			target = &users[i]
+	for i := range env.users {
+		if env.users[i].Username == username {
+			target = &env.users[i]
 			break
 		}
 	}
@@ -270,13 +446,13 @@ func (s *Service) adoptOne(ctx context.Context, username string, ac AuditContext
 		res.Error = "系统里没有这个用户"
 		return res
 	}
-	c, ok := s.inspectUser(ctx, *target, unitSet, managed)
+	c, ok := s.inspectUser(ctx, env, *target)
 	if !ok {
 		res.Error = "这个用户没有 Clawbench 数据目录"
 		return res
 	}
 	cands := []AdoptCandidate{c}
-	s.enrichCandidates(ctx, cands)
+	s.enrichCandidates(ctx, env, cands)
 	c = cands[0]
 	if c.Blocked != "" {
 		res.Error = c.Blocked
@@ -339,13 +515,14 @@ func (s *Service) adoptOne(ctx context.Context, username string, ac AuditContext
 		return s.adoptFailed(t, res, "启用服务失败", err, ac)
 	}
 
-	if c.ServiceActive {
+	if c.UnitActive {
 		if err := s.Sys.Restart(ctx, t.UnitName); err != nil {
 			return s.adoptFailed(t, res, "接管后重启失败", err, ac)
 		}
 	} else {
-		// The instance may have been started by hand. Stop only a process that
-		// belongs to this very user; anything else is reported, never killed.
+		// The instance may have been started by hand, or by an older unit with
+		// another name. Stop only a process that belongs to this very user;
+		// anything else is reported, never killed.
 		if portListening(t.Port) {
 			if err := s.Sys.StopPortOwner(ctx, t.Port, t.Username); err != nil {
 				return s.adoptFailed(t, res, "停掉旧进程失败", err, ac)
