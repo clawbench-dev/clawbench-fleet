@@ -112,6 +112,11 @@ export interface Version {
   status: string
 }
 
+export interface NpmVersion {
+  version: string
+  installed: boolean
+}
+
 export interface Settings {
   port_start: number
   port_end: number

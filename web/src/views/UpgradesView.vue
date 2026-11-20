@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { AlertTriangle, ArrowUpCircle, Play, RotateCcw, UploadCloud } from 'lucide-vue-next'
+import { AlertTriangle, ArrowUpCircle, Download, Play, RotateCcw, UploadCloud } from 'lucide-vue-next'
 import { api } from '../api'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import { toast } from '../stores/toast'
-import type { Job, Tenant, Version } from '../types'
+import type { Job, NpmVersion, Tenant, Version } from '../types'
 import { formatBytes, formatTime, shortSha } from '../utils'
 
 const versions = ref<Version[]>([])
@@ -18,6 +18,12 @@ const pilotTenant = ref(0)
 const activeJob = ref<Job | null>(null)
 const pendingApply = ref<Version | null>(null)
 const confirmRollback = ref(false)
+const npmPackage = ref('')
+const npmVersions = ref<NpmVersion[]>([])
+const npmWarning = ref('')
+const npmChoice = ref('')
+const npmLoading = ref(false)
+const installing = ref(false)
 let timer = 0
 
 async function load() {
@@ -38,6 +44,41 @@ async function load() {
     toast(e?.message || '加载失败', 'error')
   } finally {
     loading.value = false
+  }
+  loadNpm()
+}
+
+async function loadNpm() {
+  npmLoading.value = true
+  try {
+    const res = await api.get<{ package: string; versions: NpmVersion[]; warning: string }>('/upgrades/npm')
+    npmPackage.value = res.package || ''
+    npmVersions.value = res.versions || []
+    npmWarning.value = res.warning || ''
+    if (!npmChoice.value || !npmVersions.value.some((v) => v.version === npmChoice.value)) {
+      const firstNew = npmVersions.value.find((v) => !v.installed)
+      npmChoice.value = (firstNew || npmVersions.value[0])?.version || ''
+    }
+  } catch (e: any) {
+    npmWarning.value = e?.message || '读取 npm 版本列表失败'
+    npmVersions.value = []
+  } finally {
+    npmLoading.value = false
+  }
+}
+
+async function installNpm() {
+  if (!npmChoice.value) return
+  const version = npmChoice.value
+  installing.value = true
+  try {
+    await api.post<{ version: Version }>(`/upgrades/npm/${encodeURIComponent(version)}/install`)
+    toast(`已从 npm 安装 ${version}`, 'success')
+    await load()
+  } catch (e: any) {
+    toast(e?.message || '安装失败', 'error')
+  } finally {
+    installing.value = false
   }
 }
 
@@ -158,11 +199,11 @@ function statusText(v: Version): string {
         <div v-if="current">
           <div class="stat-value mono" style="font-size: 24px">{{ current.version }}</div>
           <div class="small muted-2" style="margin-top: 4px">
-            上传于 {{ formatTime(current.uploaded_at) }} · {{ formatBytes(current.size_bytes) }}
+            安装于 {{ formatTime(current.uploaded_at) }} · {{ formatBytes(current.size_bytes) }}
           </div>
           <div class="small mono muted-2" style="margin-top: 2px">SHA-256 {{ shortSha(current.sha256) }}</div>
         </div>
-        <div v-else class="empty" style="padding: 18px">还没有当前版本，先上传一个 Clawbench 二进制。</div>
+        <div v-else class="empty" style="padding: 18px">还没有当前版本，先从 npm 安装或上传一个 Clawbench 二进制。</div>
         <div class="form-actions" style="justify-content: flex-start">
           <button class="btn" type="button" :disabled="!current" @click="confirmRollback = true">
             <RotateCcw :size="15" /> 回滚到上一版
@@ -173,19 +214,34 @@ function statusText(v: Version): string {
       <div class="card">
         <div class="card-header">
           <div>
-            <div class="card-title">上传新版本</div>
-            <div class="card-sub">上传后先拿一个实例试点，通过再批量</div>
+            <div class="card-title">从 npm 安装</div>
+            <div class="card-sub">
+              {{ npmPackage ? `直接从 ${npmPackage} 拉取，装进独立目录，旧版本保留可回滚` : '从 npm 拉取新版本' }}
+            </div>
           </div>
+          <Download :size="20" color="var(--accent)" />
         </div>
-        <label class="upload-box">
-          <input type="file" style="display: none" @change="chooseFile" />
-          <UploadCloud :size="22" />
-          <div class="small" style="margin-top: 6px">{{ file ? file.name : '选择 Clawbench 二进制文件' }}</div>
-          <div class="small muted-2">{{ file ? formatBytes(file.size) : '最大 600 MB' }}</div>
-        </label>
+        <div v-if="npmWarning" class="row small" style="color: var(--amber); align-items: flex-start; margin-bottom: 10px">
+          <AlertTriangle :size="15" style="flex: 0 0 auto; margin-top: 1px" />
+          <span>{{ npmWarning }}<br />可以用下面的“离线安装”上传安装包。</span>
+        </div>
+        <div class="field" v-if="npmVersions.length">
+          <label>可用版本</label>
+          <select v-model="npmChoice" class="select mono">
+            <option v-for="v in npmVersions" :key="v.version" :value="v.version">
+              {{ v.version }}{{ v.installed ? '（已安装）' : '' }}
+            </option>
+          </select>
+        </div>
+        <div v-else-if="!npmLoading && !npmWarning" class="empty" style="padding: 14px">npm 上没有查到可用版本。</div>
         <div class="form-actions" style="justify-content: flex-start">
-          <button class="btn btn-primary" type="button" :disabled="!file || uploading" @click="upload">
-            {{ uploading ? '上传并校验中…' : '上传版本' }}
+          <button
+            class="btn btn-primary"
+            type="button"
+            :disabled="!npmChoice || installing || npmLoading"
+            @click="installNpm"
+          >
+            {{ installing ? '下载并校验中…' : npmLoading ? '查询中…' : '安装到本机' }}
           </button>
         </div>
       </div>
@@ -207,7 +263,7 @@ function statusText(v: Version): string {
 
       <div v-if="versions.length" class="table-wrap">
         <table class="table">
-          <thead><tr><th>版本</th><th>状态</th><th>大小</th><th>上传时间</th><th>SHA-256</th><th style="text-align: right">操作</th></tr></thead>
+          <thead><tr><th>版本</th><th>状态</th><th>大小</th><th>安装时间</th><th>SHA-256</th><th style="text-align: right">操作</th></tr></thead>
           <tbody>
             <tr v-for="v in versions" :key="v.id">
               <td class="mono">{{ v.version }}</td>
@@ -235,6 +291,27 @@ function statusText(v: Version): string {
         </table>
       </div>
       <div v-else class="empty" style="padding: 22px">还没有上传任何版本。</div>
+    </div>
+
+    <div class="card" style="margin-top: 16px">
+      <div class="card-header">
+        <div>
+          <div class="card-title">离线安装（上传文件）</div>
+          <div class="card-sub">服务器连不上 npm 时用这个；上传后先拿一个实例试点，通过再批量</div>
+        </div>
+        <UploadCloud :size="20" color="var(--muted)" />
+      </div>
+      <label class="upload-box">
+        <input type="file" style="display: none" @change="chooseFile" />
+        <UploadCloud :size="22" />
+        <div class="small" style="margin-top: 6px">{{ file ? file.name : '选择 Clawbench 二进制文件' }}</div>
+        <div class="small muted-2">{{ file ? formatBytes(file.size) : '最大 600 MB' }}</div>
+      </label>
+      <div class="form-actions" style="justify-content: flex-start">
+        <button class="btn" type="button" :disabled="!file || uploading" @click="upload">
+          {{ uploading ? '上传并校验中…' : '上传版本' }}
+        </button>
+      </div>
     </div>
 
     <div v-if="activeJob" class="card" style="margin-top: 16px">

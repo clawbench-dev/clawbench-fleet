@@ -66,6 +66,7 @@ export function actionLabel(action: string): string {
     'backup.delete': '删除备份',
     'backup.download': '下载备份',
     'upgrade.upload': '上传版本',
+    'upgrade.npm_install': '从 npm 安装版本',
     'upgrade.pilot': '试点升级',
     'upgrade.apply': '批量升级',
     'upgrade.rollback': '回滚版本',

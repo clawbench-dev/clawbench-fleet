@@ -2,6 +2,7 @@ package sysops
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -266,4 +267,66 @@ func (r *Real) ListUnits(ctx context.Context) ([]string, error) {
 		}
 	}
 	return out, nil
+}
+
+func (r *Real) NpmVersions(ctx context.Context, pkg, registry string) ([]string, error) {
+	if _, err := exec.LookPath("npm"); err != nil {
+		return nil, errors.New("服务器上没有 npm，请先安装 Node.js，或改用上传安装包的方式")
+	}
+	args := []string{"view", pkg, "versions", "--json"}
+	if registry != "" {
+		args = append(args, "--registry", registry)
+	}
+	out, err := run(ctx, "npm", args...)
+	if err != nil {
+		return nil, err
+	}
+	return parseNpmVersions(out)
+}
+
+func (r *Real) NpmInstall(ctx context.Context, prefix, pkg, version, registry string) error {
+	if _, err := exec.LookPath("npm"); err != nil {
+		return errors.New("服务器上没有 npm，请先安装 Node.js，或改用上传安装包的方式")
+	}
+	if err := os.MkdirAll(prefix, 0o700); err != nil {
+		return err
+	}
+	args := []string{
+		"install",
+		"--prefix", prefix,
+		"--no-audit", "--no-fund", "--loglevel=error",
+		"--omit=dev",
+	}
+	if registry != "" {
+		args = append(args, "--registry", registry)
+	}
+	args = append(args, pkg+"@"+version)
+	// Downloading a release binary can take a while on a slow link.
+	_, err := runWithin(ctx, 5*time.Minute, "npm", args...)
+	return err
+}
+
+// parseNpmVersions accepts both shapes npm returns: a bare string when the
+// package has a single version, and an array otherwise.
+func parseNpmVersions(raw string) ([]string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, errors.New("npm 没有返回任何版本")
+	}
+	var list []string
+	if err := json.Unmarshal([]byte(raw), &list); err == nil {
+		return list, nil
+	}
+	var single string
+	if err := json.Unmarshal([]byte(raw), &single); err == nil {
+		return []string{single}, nil
+	}
+	return nil, fmt.Errorf("无法解析 npm 返回的版本列表：%s", firstLine(raw))
+}
+
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
 }

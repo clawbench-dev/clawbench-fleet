@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -42,6 +44,51 @@ type System interface {
 	Metrics(ctx context.Context, unit string) (Metrics, error)
 	DiskUsage(ctx context.Context, path string) (int64, error)
 	ListUnits(ctx context.Context) ([]string, error)
+
+	// NpmVersions lists the versions published for an npm package. registry is
+	// empty when the server's default registry should be used.
+	NpmVersions(ctx context.Context, pkg, registry string) ([]string, error)
+	// NpmInstall installs pkg@version into prefix, never into the global npm
+	// prefix, so several versions can be kept side by side.
+	NpmInstall(ctx context.Context, prefix, pkg, version, registry string) error
+}
+
+// NpmPlatformPackage maps a wrapper package such as "@scope/clawbench" to the
+// per-platform package that actually ships the executable, for example
+// "@scope/clawbench-linux-x64". Clawbench publishes the binary this way so the
+// main package stays tiny.
+func NpmPlatformPackage(pkg string) (string, error) {
+	scope, name, ok := strings.Cut(strings.TrimSpace(pkg), "/")
+	if !ok || !strings.HasPrefix(scope, "@") || name == "" {
+		return "", fmt.Errorf("npm 包名 %q 不是 @scope/name 形式", pkg)
+	}
+	var suffix string
+	switch runtime.GOOS + "/" + runtime.GOARCH {
+	case "linux/amd64":
+		suffix = "linux-x64"
+	case "linux/arm64":
+		suffix = "linux-arm64"
+	case "darwin/amd64":
+		suffix = "darwin-x64"
+	case "darwin/arm64":
+		suffix = "darwin-arm64"
+	case "windows/amd64":
+		suffix = "win32-x64"
+	default:
+		return "", fmt.Errorf("npm 包不支持 %s/%s", runtime.GOOS, runtime.GOARCH)
+	}
+	return scope + "/" + name + "-" + suffix, nil
+}
+
+// NpmBinaryPath is where the executable ends up after installing pkg into
+// prefix.
+func NpmBinaryPath(prefix, pkg string) (string, error) {
+	platform, err := NpmPlatformPackage(pkg)
+	if err != nil {
+		return "", err
+	}
+	scope, name, _ := strings.Cut(platform, "/")
+	return filepath.Join(prefix, "node_modules", scope, name, "bin", "clawbench"), nil
 }
 
 // CommandError carries the command line and stderr so the UI can show a useful
@@ -64,7 +111,11 @@ func (e *CommandError) Error() string {
 func (e *CommandError) Unwrap() error { return e.Err }
 
 func run(ctx context.Context, name string, args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	return runWithin(ctx, 60*time.Second, name, args...)
+}
+
+func runWithin(ctx context.Context, timeout time.Duration, name string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, name, args...)
 	out, err := cmd.CombinedOutput()

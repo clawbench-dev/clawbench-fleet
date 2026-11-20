@@ -82,6 +82,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /api/trash/{id}", s.protected(s.handlePurgeTrash))
 
 	s.mux.HandleFunc("GET /api/upgrades", s.protected(s.handleListUpgrades))
+	s.mux.HandleFunc("GET /api/upgrades/npm", s.protected(s.handleNpmVersions))
+	s.mux.HandleFunc("POST /api/upgrades/npm/{version}/install", s.protected(s.handleNpmInstall))
 	s.mux.HandleFunc("POST /api/upgrades/upload", s.protected(s.handleUploadVersion))
 	s.mux.HandleFunc("POST /api/upgrades/{version}/pilot", s.protected(s.handlePilot))
 	s.mux.HandleFunc("POST /api/upgrades/{version}/apply", s.protected(s.handleApplyUpgrade))

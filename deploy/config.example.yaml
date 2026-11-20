@@ -27,6 +27,11 @@ clawbench:
   allow_port_forward: false
   # 员工地址里显示的主机名；留空自动探测本机内网 IP
   public_host: ""
+  # 从 npm 安装新版本时用的包名（Clawbench 官方发布包）
+  npm_package: "@xulongzhe/clawbench"
+  # npm 源；留空用服务器默认源。内网可填私有镜像，例如
+  # https://registry.npmmirror.com/
+  npm_registry: ""
 
 backup:
   enabled: true

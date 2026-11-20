@@ -406,7 +406,10 @@ func (s *Service) waitHealthy(ctx context.Context, port int, wantVersion string,
 	for {
 		info, err := s.healthCheck(ctx, port)
 		if err == nil {
-			if wantVersion == "" || info.Version == wantVersion {
+			// Clawbench reports the git tag ("v0.143.0") while npm publishes
+			// "0.143.0"; compare without the prefix so an npm install is not
+			// rejected as "wrong version".
+			if wantVersion == "" || normalizeVersion(info.Version) == normalizeVersion(wantVersion) {
 				return info, nil
 			}
 			lastErr = fmt.Errorf("版本还是 %s，等待 %s", info.Version, wantVersion)

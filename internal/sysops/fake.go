@@ -358,3 +358,23 @@ func (f *Fake) currentVersion() string {
 	}
 	return filepath.Base(target)
 }
+
+// NpmVersions pretends the package has a few published versions so the whole
+// npm install flow can be exercised in --dev.
+func (f *Fake) NpmVersions(ctx context.Context, pkg, registry string) ([]string, error) {
+	return []string{"0.141.0", "0.142.0", "0.143.0"}, nil
+}
+
+// NpmInstall writes a tiny shell script where the real binary would be, so the
+// version validation and the symlink switch behave exactly like production.
+func (f *Fake) NpmInstall(ctx context.Context, prefix, pkg, version, registry string) error {
+	bin, err := NpmBinaryPath(prefix, pkg)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(bin), 0o755); err != nil {
+		return err
+	}
+	script := "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo " + version + "; exit 0; fi\nexit 0\n"
+	return os.WriteFile(bin, []byte(script), 0o755)
+}

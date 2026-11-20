@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"clawbench-fleet/internal/fleet"
 	"clawbench-fleet/internal/store"
 )
 
@@ -120,4 +121,29 @@ func (s *Server) handleJobArtifact(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", "import-"+strconv.FormatInt(id, 10)+"-"+name))
 	_, _ = w.Write(data)
+}
+
+// handleNpmVersions lists what npm has published. npm being missing or the
+// network being down is reported as a warning instead of an error so the page
+// still renders and the offline upload path stays usable.
+func (s *Server) handleNpmVersions(w http.ResponseWriter, r *http.Request) {
+	versions, warning := s.svc.ListNpmVersions(r.Context())
+	if versions == nil {
+		versions = []fleet.NpmVersionInfo{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"package":  s.svc.NpmPackage(),
+		"versions": versions,
+		"warning":  warning,
+	})
+}
+
+func (s *Server) handleNpmInstall(w http.ResponseWriter, r *http.Request) {
+	version := r.PathValue("version")
+	v, err := s.svc.InstallFromNpm(r.Context(), version, auditCtx(r))
+	if err != nil {
+		writeServiceErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"version": v})
 }

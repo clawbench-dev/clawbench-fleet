@@ -43,7 +43,7 @@ export const router = createRouter({
     {
       path: '/upgrades',
       component: UpgradesView,
-      meta: { title: '升级中心', sub: '上传版本、试点、批量升级和回滚' },
+      meta: { title: '升级中心', sub: '从 npm 安装或上传版本、试点、批量升级和回滚' },
     },
     {
       path: '/trash',

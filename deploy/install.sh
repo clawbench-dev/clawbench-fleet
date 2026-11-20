@@ -39,6 +39,11 @@ fi
 [[ -x "${BIN_SRC}" ]] || { echo "找不到二进制 ${BIN_SRC}，先运行 ./build.sh"; exit 1; }
 command -v systemctl >/dev/null || { echo "需要 systemd"; exit 1; }
 
+if ! command -v npm >/dev/null; then
+  echo "提示：服务器上没有 npm。升级中心将无法从 npm 拉取新版本，"
+  echo "      需要手动上传安装包，或先安装 Node.js 再重启本服务。"
+fi
+
 install -m 0755 "${BIN_SRC}" "${BIN_DST}"
 install -d -m 0755 "${CONF_DIR}"
 install -d -m 0700 "${DATA_DIR}"

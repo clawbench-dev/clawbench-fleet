@@ -330,3 +330,81 @@ func TestSettingsValidation(t *testing.T) {
 		t.Fatal("invalid cpu quota should be rejected")
 	}
 }
+
+func TestNpmVersionsAndInstall(t *testing.T) {
+	svc, _ := newTestService(t)
+	ctx := context.Background()
+	ac := AuditContext{Actor: "tester"}
+
+	list, warning := svc.ListNpmVersions(ctx)
+	if warning != "" {
+		t.Fatalf("unexpected warning: %s", warning)
+	}
+	if len(list) != 3 {
+		t.Fatalf("got %d versions, want 3", len(list))
+	}
+	if list[0].Version != "0.143.0" {
+		t.Fatalf("newest version should be first, got %s", list[0].Version)
+	}
+
+	v, err := svc.InstallFromNpm(ctx, "0.143.0", ac)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Version != "0.143.0" {
+		t.Fatalf("version = %s", v.Version)
+	}
+	if fi, err := os.Stat(v.Path); err != nil || fi.Size() == 0 {
+		t.Fatalf("installed binary missing: %v", err)
+	}
+
+	// The first installed version becomes current so instances can start.
+	cur, err := svc.CurrentVersion()
+	if err != nil || cur.Version != "0.143.0" {
+		t.Fatalf("current version = %v (%v)", cur, err)
+	}
+
+	// Installing the same version twice must not overwrite anything.
+	if _, err := svc.InstallFromNpm(ctx, "0.143.0", ac); err == nil {
+		t.Fatal("expected an error when installing the same version twice")
+	}
+
+	list, _ = svc.ListNpmVersions(ctx)
+	for _, item := range list {
+		if item.Version == "0.143.0" && !item.Installed {
+			t.Fatal("installed version not marked as installed")
+		}
+		if item.Version != "0.143.0" && item.Installed {
+			t.Fatalf("%s should not be marked installed", item.Version)
+		}
+	}
+
+	// A second version lands beside the first one; nothing is replaced.
+	if _, err := svc.InstallFromNpm(ctx, "0.142.0", ac); err != nil {
+		t.Fatal(err)
+	}
+	if cur, _ := svc.CurrentVersion(); cur.Version != "0.143.0" {
+		t.Fatalf("current version should not move on its own, got %s", cur.Version)
+	}
+	if versions, _ := svc.ListVersions(); len(versions) != 2 {
+		t.Fatalf("expected 2 installed versions, got %d", len(versions))
+	}
+}
+
+func TestCompareVersions(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want int
+	}{
+		{"0.143.0", "0.142.9", 1},
+		{"0.9.0", "0.10.0", -1},
+		{"v0.143.0", "0.143.0", 0},
+		{"1.0.0", "1.0", 1},
+	}
+	for _, c := range cases {
+		got := compareVersions(c.a, c.b)
+		if (got > 0) != (c.want > 0) || (got < 0) != (c.want < 0) {
+			t.Fatalf("compareVersions(%q, %q) = %d, want sign %d", c.a, c.b, got, c.want)
+		}
+	}
+}

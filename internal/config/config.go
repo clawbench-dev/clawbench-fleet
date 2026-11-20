@@ -39,6 +39,11 @@ type ClawbenchConfig struct {
 	DiskWarnGB       int    `yaml:"disk_warn_gb"`
 	AllowPortForward bool   `yaml:"allow_port_forward"`
 	PublicHost       string `yaml:"public_host"`
+	// NpmPackage is the wrapper package published to npm. The actual binary
+	// comes from the per-platform package it depends on.
+	NpmPackage string `yaml:"npm_package"`
+	// NpmRegistry overrides the default registry, e.g. an intranet mirror.
+	NpmRegistry string `yaml:"npm_registry"`
 }
 
 type BackupConfig struct {
@@ -80,6 +85,7 @@ func Default() Config {
 			DefaultMemoryMax: "4G",
 			DefaultTasksMax:  512,
 			DiskWarnGB:       5,
+			NpmPackage:       "@xulongzhe/clawbench",
 		},
 		Backup: BackupConfig{Enabled: true, Hour: 3, RetentionDays: 7},
 		Trash:  TrashConfig{RetentionDays: 30},
@@ -149,6 +155,12 @@ func (c *Config) Normalize() error {
 	}
 	if c.Clawbench.DefaultTasksMax < 1 {
 		return errors.New("default_tasks_max must be positive")
+	}
+	if strings.TrimSpace(c.Clawbench.NpmPackage) == "" {
+		c.Clawbench.NpmPackage = "@xulongzhe/clawbench"
+	}
+	if !strings.Contains(c.Clawbench.NpmPackage, "/") {
+		return fmt.Errorf("npm_package %q 必须是 @scope/name 形式", c.Clawbench.NpmPackage)
 	}
 	if c.Backup.Hour < 0 || c.Backup.Hour > 23 {
 		return fmt.Errorf("backup.hour must be 0-23, got %d", c.Backup.Hour)

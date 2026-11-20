@@ -448,11 +448,24 @@ bob,李四,产品部
 /opt/clawbench-fleet/current -> versions/1.2.4
 ```
 
-上传：
+获取新版本（两条路，结果完全一样）：
+
+**A. 从 npm 安装（主路径）**
+
+1. 升级中心向 npm 查询 `@xulongzhe/clawbench` 的已发布版本，列表里标出本机已有的。
+2. 管理员选一个版本点“安装到本机”。
+3. 平台执行 `npm install --prefix <临时目录> @xulongzhe/clawbench@<版本>`。装到临时目录而不是全局，是为了多个版本能共存。
+4. 从 `node_modules/@xulongzhe/clawbench-linux-<arch>/bin/clawbench` 取出可执行文件，复制到 `versions/<版本>/clawbench`，权限 0755。
+5. 校验：能执行 `--version` 并输出版本号；记录 SHA-256；删掉临时目录。
+6. 服务器没装 npm 或连不上 npm 时，页面提示原因，改用下面的上传方式。
+
+**B. 离线安装（上传文件）**
 
 1. 管理员在升级中心上传 Clawbench 二进制。
 2. 平台校验：文件是 Linux 可执行文件、大小合理、能执行 `--version` 并输出版本号。
 3. 保存到 `versions/<版本>/clawbench`，权限 0755，记录 SHA-256。
+
+两条路的版本号都以程序自己 `--version` 的输出为准，所以目录名、页面显示、健康检查三处永远一致（`v0.143.0` 和 `0.143.0` 视为同一版）。
 
 试点：
 
@@ -545,7 +558,7 @@ WantedBy=multi-user.target
 | 租户详情 | 单个租户的全部操作 | 地址/端口/版本/状态、启动/停止/重启、重置密码、配额修改、日志、备份列表、操作记录 |
 | 新建租户 | 单个建号 | 登录名、显示名、备注、配额；成功后弹窗显示地址和初始密码 |
 | 批量导入 | CSV 导入 | 上传、预览（可导入/有问题）、开始导入、进度、下载成功/失败清单 |
-| 升级中心 | 版本管理 | 当前版本、已上传版本、上传新版本、试点、批量升级、回滚、任务进度 |
+| 升级中心 | 版本管理 | 当前版本、从 npm 安装、离线上传、已安装版本、试点、批量升级、回滚、任务进度 |
 | 回收站 | 误删恢复 | 已删除租户、占用大小、剩余天数、恢复、强制删除 |
 | 审计日志 | 追责 | 时间、操作人、动作、对象、结果、IP；按条件筛选 |
 | 设置 | 平台配置 | 端口范围、默认配额、备份时间/保留天数、回收站天数、审计保留天数、改管理员密码 |
@@ -629,7 +642,9 @@ WantedBy=multi-user.target
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/upgrades` | 当前版本、已上传版本、最近任务 |
-| POST | `/api/upgrades/upload` | 上传二进制（multipart） |
+| GET | `/api/upgrades/npm` | npm 上可用的版本，标出本机已安装的 |
+| POST | `/api/upgrades/npm/{version}/install` | 从 npm 下载并安装到本机 |
+| POST | `/api/upgrades/upload` | 上传二进制（multipart，离线兜底） |
 | POST | `/api/upgrades/{version}/pilot` | 试点，body：`{tenant_id}` |
 | POST | `/api/upgrades/{version}/apply` | 批量升级 |
 | POST | `/api/upgrades/rollback` | 回滚到上一版 |
@@ -815,6 +830,8 @@ clawbench:
   default_memory_max: "4G"
   default_tasks_max: 512
   disk_warn_gb: 5
+  npm_package: "@xulongzhe/clawbench"
+  npm_registry: ""
 
 backup:
   enabled: true
@@ -939,7 +956,7 @@ tls:
    ```
 5. `systemctl daemon-reload && systemctl enable --now clawbench-fleet`。
 6. 从 `/var/lib/clawbench-fleet/initial-password` 读初始密码，打开 `http://<IP>:30000` 登录。
-7. 在升级中心上传第一份 Clawbench 二进制，才能开始建号。
+7. 在升级中心装第一份 Clawbench（能连 npm 就点「从 npm 安装」，否则上传二进制），才能开始建号。
 
 ### 15.3 卸载
 
