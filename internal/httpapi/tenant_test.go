@@ -438,8 +438,11 @@ func TestStaticFallback(t *testing.T) {
 	}
 	data, _ := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusOK || !strings.Contains(string(data), "<html") {
-		t.Fatalf("spa fallback = %d %s", resp.StatusCode, data)
+	// A built checkout returns the real index.html; a clean checkout (CI does
+	// not build the frontend for the test job) returns the "not built yet"
+	// placeholder. Both must be a 200 HTML page.
+	if resp.StatusCode != http.StatusOK || !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/html") || !strings.Contains(string(data), "Clawbench Fleet") {
+		t.Fatalf("spa fallback = %d %s %s", resp.StatusCode, resp.Header.Get("Content-Type"), data)
 	}
 	req, _ = http.NewRequest(http.MethodGet, c.srv.URL+"/api/does-not-exist", http.NoBody)
 	resp, err = c.http.Do(req)
