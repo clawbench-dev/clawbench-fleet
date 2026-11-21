@@ -57,6 +57,10 @@ type Service struct {
 
 	orphansMu sync.RWMutex
 	orphans   []string
+
+	// provisioners tracks in-flight background creations so a synchronous
+	// caller can find out when its tenant is really ready.
+	provisioners *provisionTracker
 }
 
 type cpuSample struct {
@@ -75,16 +79,17 @@ func New(cfg config.Config, st *store.Store, sys sysops.System) (*Service, error
 		return nil, err
 	}
 	s := &Service{
-		Cfg:        cfg,
-		Store:      st,
-		Sys:        sys,
-		settings:   stg,
-		sem:        make(chan struct{}, 4),
-		metrics:    map[int64]domain.Metrics{},
-		artifacts:  map[int64]map[string][]byte{},
-		artifactAt: map[int64]time.Time{},
-		http:       &http.Client{Timeout: 3 * time.Second},
-		lastDaily:  map[string]string{},
+		Cfg:          cfg,
+		Store:        st,
+		Sys:          sys,
+		settings:     stg,
+		sem:          make(chan struct{}, 4),
+		metrics:      map[int64]domain.Metrics{},
+		artifacts:    map[int64]map[string][]byte{},
+		artifactAt:   map[int64]time.Time{},
+		http:         &http.Client{Timeout: 3 * time.Second},
+		lastDaily:    map[string]string{},
+		provisioners: &provisionTracker{done: map[int64]chan struct{}{}},
 	}
 	if err := st.SeedPorts(stg.PortStart, stg.PortEnd); err != nil {
 		return nil, err

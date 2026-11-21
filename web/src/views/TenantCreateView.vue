@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { AlertTriangle, ArrowRight, CheckCircle2, Plus } from 'lucide-vue-next'
+import { AlertTriangle, ArrowRight, CheckCircle2, Loader2, Plus } from 'lucide-vue-next'
 import { api } from '../api'
 import CopyField from '../components/CopyField.vue'
 import Modal from '../components/Modal.vue'
@@ -20,7 +20,7 @@ const form = ref({
 })
 const submitting = ref(false)
 const error = ref('')
-const created = ref<{ tenant: Tenant; password: string; warning?: string } | null>(null)
+const created = ref<{ tenant: Tenant; password: string; warning?: string; pending?: boolean } | null>(null)
 
 async function submit() {
   error.value = ''
@@ -34,9 +34,9 @@ async function submit() {
     if (form.value.cpu_quota.trim()) body.cpu_quota = form.value.cpu_quota.trim()
     if (form.value.memory_max.trim()) body.memory_max = form.value.memory_max.trim()
     if (form.value.tasks_max > 0) body.tasks_max = form.value.tasks_max
-    const res = await api.post<{ tenant: Tenant; password: string; warning?: string }>('/tenants', body)
+    const res = await api.post<{ tenant: Tenant; password: string; warning?: string; pending?: boolean }>('/tenants', body)
     created.value = res
-    toast('租户创建成功', 'success')
+    toast(res.pending ? '已受理，实例正在后台创建' : '租户创建成功', 'success')
   } catch (e: any) {
     error.value = e?.message || '创建失败'
   } finally {
@@ -122,11 +122,12 @@ function createAnother() {
       </div>
     </div>
 
-    <Modal v-if="created" title="租户创建成功" wide @close="goDetail">
+    <Modal v-if="created" :title="created.pending ? '已提交，正在后台创建' : '租户创建成功'" wide @close="goDetail">
       <div class="row" style="gap: 8px; margin-bottom: 14px">
-        <CheckCircle2 :size="18" color="var(--green)" />
+        <CheckCircle2 v-if="!created.pending" :size="18" color="var(--green)" />
+        <Loader2 v-else :size="18" color="var(--amber)" />
         <strong>{{ created.tenant.username }}</strong>
-        <span class="small muted">已创建</span>
+        <span class="small muted">{{ created.pending ? '实例启动中，稍后刷新列表看结果' : '已创建' }}</span>
       </div>
 
       <div v-if="created.warning" class="card" style="border-color: rgba(245,185,76,.4); padding: 12px; margin-bottom: 14px">
@@ -139,7 +140,12 @@ function createAnother() {
       </div>
 
       <div class="small muted-2" style="margin-top: 14px">
-        员工打开地址后用这个密码登录。密码丢了只能重置。
+        <template v-if="created.pending">
+          账号已经建好，实例还在后台启动（一般十几秒到一分钟）。现在就可以把地址和密码发给员工，等列表里的状态变成“运行中”再让员工登录。
+        </template>
+        <template v-else>
+          员工打开地址后用这个密码登录。密码丢了只能重置。
+        </template>
       </div>
 
       <template #footer>

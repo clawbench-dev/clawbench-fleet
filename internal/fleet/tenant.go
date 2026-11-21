@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"clawbench-fleet/internal/domain"
@@ -96,7 +97,36 @@ func (s *Service) setMetrics(id int64, m domain.Metrics) {
 	s.metricsMu.Unlock()
 }
 
+// CreateTenant runs the whole creation synchronously. The HTTP layer uses
+// CreateTenantAsync instead so the page does not have to sit through the
+// 60-second health wait; the CSV import still calls this one because it writes
+// per-row results as it goes.
 func (s *Service) CreateTenant(ctx context.Context, in CreateTenantInput, ac AuditContext) (*domain.Tenant, string, error) {
+	t, password, err := s.CreateTenantAsync(ctx, in, ac)
+	if err != nil {
+		return t, password, err
+	}
+	// CreateTenantAsync returns while the tenant is still `creating`. Wait for
+	// the background job so this caller gets the finished instance, which is
+	// what the CSV import needs to write its per-row result.
+	if msg, ok := s.waitForCreation(ctx, t.ID, 3*time.Minute); !ok {
+		return t, password, errors.New(msg)
+	}
+	fresh, err := s.Store.GetTenant(t.ID)
+	if err != nil {
+		return t, password, nil
+	}
+	if fresh.Status == domain.StatusError {
+		return fresh, password, fmt.Errorf("实例已创建但未就绪：%s", fresh.LastError)
+	}
+	return fresh, password, nil
+}
+
+// CreateTenantAsync records the tenant and returns as soon as the record
+// exists; the slow part (useradd, systemd, waiting for the instance to come
+// up) runs in the background. The password is generated up front so the caller
+// can show it immediately.
+func (s *Service) CreateTenantAsync(ctx context.Context, in CreateTenantInput, ac AuditContext) (*domain.Tenant, string, error) {
 	username := strings.TrimSpace(in.Username)
 	if err := ValidateUsername(username); err != nil {
 		return nil, "", err
@@ -107,6 +137,9 @@ func (s *Service) CreateTenant(ctx context.Context, in CreateTenantInput, ac Aud
 	if existing, err := s.Store.GetTenantByUsername(username); err == nil {
 		if existing.Status == domain.StatusTrashed {
 			return nil, "", fmt.Errorf("回收站里还有同名租户，请先恢复或彻底删除")
+		}
+		if existing.Status == domain.StatusError {
+			return nil, "", fmt.Errorf("上次创建 %s 失败并留下了记录，请先在列表里删掉它再重建", username)
 		}
 		return nil, "", fmt.Errorf("登录名 %s 已存在", username)
 	}
@@ -165,47 +198,115 @@ func (s *Service) CreateTenant(ctx context.Context, in CreateTenantInput, ac Aud
 
 	password, err := GeneratePassword(12)
 	if err != nil {
-		s.rollbackCreate(ctx, t)
+		s.rollbackCreate(ctx, t, true)
 		return nil, "", err
 	}
 
-	if err := s.Sys.CreateUser(ctx, username, uid); err != nil {
-		s.rollbackCreate(ctx, t)
-		return nil, "", fmt.Errorf("创建 Linux 用户失败：%w", err)
+	// Hand the slow work to the background. The context here dies with the
+	// HTTP request, so a caller hanging up would otherwise abort useradd or
+	// the health wait halfway through.
+	s.startProvision(t, password, ac)
+
+	fresh, err := s.Store.GetTenant(t.ID)
+	if err != nil {
+		return t, password, nil
 	}
-	if uid, gid, err := s.Sys.LookupIDs(ctx, username); err == nil {
+	return fresh, password, nil
+}
+
+// startProvision kicks off the provisioning sequence in the background. It
+// keeps a copy of the tenant so the caller's struct can be mutated freely.
+func (s *Service) startProvision(t *domain.Tenant, password string, ac AuditContext) {
+	snapshot := *t
+	if s.provisioners == nil {
+		s.provisioners = &provisionTracker{done: map[int64]chan struct{}{}}
+	}
+	ch := make(chan struct{})
+	s.provisioners.mu.Lock()
+	s.provisioners.done[snapshot.ID] = ch
+	s.provisioners.mu.Unlock()
+
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				msg := fmt.Sprintf("创建过程意外中断：%v", r)
+				_ = s.Store.SetTenantStatus(snapshot.ID, domain.StatusError, msg)
+				s.Audit(ac, "tenant.create", &snapshot, map[string]any{"port": snapshot.Port, "uid": snapshot.UID}, errors.New(msg))
+			}
+			s.provisioners.mu.Lock()
+			delete(s.provisioners.done, snapshot.ID)
+			s.provisioners.mu.Unlock()
+			close(ch)
+		}()
+		// Not tied to the request: the whole point is to outlive it.
+		ctx := context.Background()
+		if err := s.acquire(ctx); err != nil {
+			_ = s.Store.SetTenantStatus(snapshot.ID, domain.StatusError, err.Error())
+			return
+		}
+		defer s.release()
+		s.provisionTenant(ctx, &snapshot, password, ac)
+	}()
+}
+
+// waitForCreation blocks until the background provisioning for id finishes.
+func (s *Service) waitForCreation(ctx context.Context, id int64, timeout time.Duration) (string, bool) {
+	if s.provisioners == nil {
+		return "", true
+	}
+	s.provisioners.mu.Lock()
+	ch, ok := s.provisioners.done[id]
+	s.provisioners.mu.Unlock()
+	if !ok {
+		return "", true
+	}
+	select {
+	case <-ch:
+		return "", true
+	case <-time.After(timeout):
+		return "实例还在后台创建中，稍后刷新列表查看结果", false
+	case <-ctx.Done():
+		return "实例还在后台创建中，稍后刷新列表查看结果", false
+	}
+}
+
+// provisionTenant does the expensive part of creating a tenant: the Linux
+// account, the config, the systemd unit, then waiting for the instance to
+// answer its health check. Failures leave the record in place with a reason so
+// the operator can see what went wrong and retry or clean up.
+func (s *Service) provisionTenant(ctx context.Context, t *domain.Tenant, password string, ac AuditContext) {
+	if err := s.Sys.CreateUser(ctx, t.Username, t.UID); err != nil {
+		s.failCreate(ctx, t, ac, fmt.Errorf("创建 Linux 用户失败：%w", err))
+		return
+	}
+	if uid, gid, err := s.Sys.LookupIDs(ctx, t.Username); err == nil {
 		t.UID, t.GID = uid, gid
 	}
 	if err := s.writeTenantConfig(t, password); err != nil {
-		s.rollbackCreate(ctx, t)
-		return nil, "", fmt.Errorf("写租户配置失败：%w", err)
+		s.failCreate(ctx, t, ac, fmt.Errorf("写租户配置失败：%w", err))
+		return
 	}
 	if err := s.writeUnit(ctx, t); err != nil {
-		s.rollbackCreate(ctx, t)
-		return nil, "", fmt.Errorf("写 systemd 单元失败：%w", err)
+		s.failCreate(ctx, t, ac, fmt.Errorf("写 systemd 单元失败：%w", err))
+		return
 	}
 	if err := s.reloadUnits(ctx); err != nil {
-		s.rollbackCreate(ctx, t)
-		return nil, "", fmt.Errorf("systemd 重载失败：%w", err)
+		s.failCreate(ctx, t, ac, fmt.Errorf("systemd 重载失败：%w", err))
+		return
 	}
 	if err := s.Sys.Enable(ctx, t.UnitName); err != nil {
-		s.rollbackCreate(ctx, t)
-		return nil, "", fmt.Errorf("启用服务失败：%w", err)
+		s.failCreate(ctx, t, ac, fmt.Errorf("启用服务失败：%w", err))
+		return
 	}
 	if err := s.Sys.Start(ctx, t.UnitName); err != nil {
-		s.rollbackCreate(ctx, t)
-		return nil, "", fmt.Errorf("启动服务失败：%w", err)
+		s.failCreate(ctx, t, ac, fmt.Errorf("启动服务失败：%w", err))
+		return
 	}
 
 	info, err := s.waitHealthy(ctx, t.Port, "", 60*time.Second)
 	if err != nil {
-		t.Status = domain.StatusError
-		t.LastError = err.Error()
-		t.LastHealthOK = false
-		t.LastHealthAt = time.Now().Format(time.RFC3339)
-		_ = s.Store.UpdateTenant(t)
-		s.Audit(ac, "tenant.create", t, map[string]any{"port": t.Port, "uid": t.UID}, err)
-		return t, password, fmt.Errorf("实例已创建但未就绪：%w", err)
+		s.failCreate(ctx, t, ac, fmt.Errorf("实例已创建但未就绪：%w", err))
+		return
 	}
 
 	t.Status = domain.StatusRunning
@@ -215,18 +316,40 @@ func (s *Service) CreateTenant(ctx context.Context, in CreateTenantInput, ac Aud
 	t.LastError = ""
 	_ = s.Store.UpdateTenant(t)
 	s.Audit(ac, "tenant.create", t, map[string]any{"port": t.Port, "uid": t.UID}, nil)
-	return t, password, nil
 }
 
-func (s *Service) rollbackCreate(ctx context.Context, t *domain.Tenant) {
+// failCreate records why a creation stopped. The tenant stays in the list
+// with an error so the operator can see it and clean up; the Linux user and
+// any unit that were created are left alone because partially built state is
+// easier to inspect than state that silently vanished.
+func (s *Service) failCreate(ctx context.Context, t *domain.Tenant, ac AuditContext, err error) {
+	t.Status = domain.StatusError
+	t.LastError = err.Error()
+	t.LastHealthOK = false
+	t.LastHealthAt = time.Now().Format(time.RFC3339)
+	_ = s.Store.UpdateTenant(t)
+	s.Audit(ac, "tenant.create", t, map[string]any{"port": t.Port, "uid": t.UID}, err)
+}
+
+// rollbackCreate undoes whatever exists for a tenant whose record was already
+// written. When deleteRecord is false the database row survives so the error
+// stays visible.
+func (s *Service) rollbackCreate(ctx context.Context, t *domain.Tenant, deleteRecord bool) {
 	_ = s.Sys.Stop(ctx, t.UnitName)
 	_ = s.Sys.Disable(ctx, t.UnitName)
 	_ = s.Sys.RemoveUnit(ctx, t.UnitName)
 	_ = s.reloadUnits(ctx)
 	_ = s.Sys.DeleteUser(ctx, t.Username)
 	_ = os.RemoveAll(t.HomeDir)
-	_ = s.Store.DeleteTenant(t.ID)
-	_ = s.Store.ReleasePorts(t.ID)
+	if deleteRecord {
+		_ = s.Store.DeleteTenant(t.ID)
+		_ = s.Store.ReleasePorts(t.ID)
+	}
+}
+
+type provisionTracker struct {
+	mu   sync.Mutex
+	done map[int64]chan struct{}
 }
 
 func firstNonEmpty(v, fallback string) string {

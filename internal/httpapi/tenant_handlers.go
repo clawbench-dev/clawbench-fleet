@@ -57,14 +57,21 @@ func (s *Server) handleCreateTenant(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &in) {
 		return
 	}
-	t, password, err := s.svc.CreateTenant(r.Context(), in, auditCtx(r))
+	t, password, err := s.svc.CreateTenantAsync(r.Context(), in, auditCtx(r))
 	if t == nil {
 		if err != nil {
 			writeServiceErr(w, err)
 		}
 		return
 	}
-	resp := map[string]any{"tenant": s.svc.TenantDTO(*t), "password": password}
+	// The tenant exists but its instance is still starting; the page gets the
+	// record and the password right away and can poll the list for the final
+	// status.
+	resp := map[string]any{
+		"tenant":   s.svc.TenantDTO(*t),
+		"password": password,
+		"pending":  t.Status == domain.StatusCreating,
+	}
 	if err != nil {
 		resp["warning"] = err.Error()
 	}
