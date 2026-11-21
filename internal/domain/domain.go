@@ -34,6 +34,9 @@ type Tenant struct {
 	DiskChecked  string `json:"disk_checked_at"`
 	LastHealthAt string `json:"last_health_at"`
 	LastHealthOK bool   `json:"last_health_ok"`
+	// LastActiveAt is the newest timestamp of the员工 actually talking to the
+	// instance, read from the instance's own database. Empty means unknown.
+	LastActiveAt string `json:"last_active_at"`
 	LastError    string `json:"last_error"`
 	CreatedAt    string `json:"created_at"`
 	UpdatedAt    string `json:"updated_at"`

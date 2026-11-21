@@ -80,6 +80,7 @@ func (s *Store) migrate() error {
 			disk_checked_at TEXT NOT NULL DEFAULT '',
 			last_health_at TEXT NOT NULL DEFAULT '',
 			last_health_ok INTEGER NOT NULL DEFAULT 0,
+			last_active_at TEXT NOT NULL DEFAULT '',
 			last_error TEXT NOT NULL DEFAULT '',
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL,
@@ -190,7 +191,41 @@ func (s *Store) migrate() error {
 			return fmt.Errorf("migrate: %w", err)
 		}
 	}
+	// Databases created before last_active_at existed need the column added;
+	// SQLite has no "ADD COLUMN IF NOT EXISTS", so check first.
+	if err := s.addColumnIfMissing("tenants", "last_active_at", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("migrate: %w", err)
+	}
 	return nil
+}
+
+// addColumnIfMissing is a tiny migration helper for columns added after the
+// first release. ALTER TABLE ADD COLUMN is cheap and never rewrites rows.
+func (s *Store) addColumnIfMissing(table, column, decl string) error {
+	rows, err := s.db.Query(`SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return err
+	}
+	found := false
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == column {
+			found = true
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if found {
+		return nil
+	}
+	_, err = s.db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + column + ` ` + decl)
+	return err
 }
 
 func now() string { return time.Now().Format(time.RFC3339) }

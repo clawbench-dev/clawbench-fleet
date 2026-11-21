@@ -24,6 +24,23 @@ export function formatDate(value: string): string {
   return d.toLocaleDateString('zh-CN')
 }
 
+// formatAgo 把“最近活跃时间”说成人话：管理员要看的是“这个人多久没动了”，
+// 不是精确到秒的时间戳。超过 30 天直接给日期，再精确到天就没意义了。
+export function formatAgo(value: string, now: Date = new Date()): string {
+  if (!value) return '无记录'
+  const d = new Date(value)
+  if (Number.isNaN(d.getTime())) return value
+  const minutes = Math.floor((now.getTime() - d.getTime()) / 60000)
+  if (minutes < 0) return formatDate(value)
+  if (minutes < 1) return '刚刚'
+  if (minutes < 60) return `${minutes} 分钟前`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours} 小时前`
+  const days = Math.floor(hours / 24)
+  if (days < 30) return `${days} 天前`
+  return formatDate(value)
+}
+
 export function formatPercent(n: number): string {
   if (!Number.isFinite(n)) return '0%'
   return `${n.toFixed(n >= 10 ? 0 : 1)}%`

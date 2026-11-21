@@ -18,7 +18,7 @@ import Modal from '../components/Modal.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import { toast } from '../stores/toast'
 import type { AdoptCandidate, AdoptResult, Job, Page, Tenant } from '../types'
-import { formatBytes, formatPercent, formatTime } from '../utils'
+import { formatAgo, formatBytes, formatPercent, formatTime } from '../utils'
 
 const items = ref<Tenant[]>([])
 const total = ref(0)
@@ -270,6 +270,7 @@ function scanStatus(c: AdoptCandidate) {
             <th>CPU</th>
             <th>内存</th>
             <th>磁盘</th>
+            <th>最近活跃</th>
             <th style="text-align: right">操作</th>
           </tr>
         </thead>
@@ -286,6 +287,7 @@ function scanStatus(c: AdoptCandidate) {
             <td class="num small">{{ formatPercent(t.metrics?.cpu_percent || 0) }}</td>
             <td class="num small">{{ formatBytes(t.metrics?.memory_bytes || 0) }}</td>
             <td class="num small">{{ formatBytes(t.disk_bytes || 0) }}</td>
+            <td class="small" :title="'最近一次对话：' + formatTime(t.last_active_at)">{{ formatAgo(t.last_active_at) }}</td>
             <td>
               <div class="actions">
                 <button

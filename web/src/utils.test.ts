@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatBytes, formatPercent, shortSha, statusLabel, actionLabel } from './utils'
+import { formatAgo, formatBytes, formatPercent, shortSha, statusLabel, actionLabel } from './utils'
 
 describe('formatBytes', () => {
   it('renders plain bytes', () => {
@@ -34,5 +34,24 @@ describe('labels', () => {
     expect(shortSha('abc')).toBe('abc')
     expect(shortSha('a'.repeat(64)).length).toBe(12)
     expect(shortSha('')).toBe('—')
+  })
+})
+
+describe('formatAgo', () => {
+  const now = new Date('2026-11-21T12:00:00Z')
+
+  it('says 无记录 when the value is empty', () => {
+    expect(formatAgo('', now)).toBe('无记录')
+  })
+
+  it('counts minutes, hours and days', () => {
+    expect(formatAgo('2026-11-21T11:59:40Z', now)).toBe('刚刚')
+    expect(formatAgo('2026-11-21T11:30:00Z', now)).toBe('30 分钟前')
+    expect(formatAgo('2026-11-21T09:00:00Z', now)).toBe('3 小时前')
+    expect(formatAgo('2026-11-18T12:00:00Z', now)).toBe('3 天前')
+  })
+
+  it('falls back to a date past 30 days', () => {
+    expect(formatAgo('2026-01-02T12:00:00Z', now)).toBe('2026/1/2')
   })
 })

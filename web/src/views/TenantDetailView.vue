@@ -23,7 +23,7 @@ import Modal from '../components/Modal.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import { toast } from '../stores/toast'
 import type { AuditEntry, Backup, Tenant } from '../types'
-import { actionLabel, formatBytes, formatTime } from '../utils'
+import { actionLabel, formatAgo, formatBytes, formatTime } from '../utils'
 
 const route = useRoute()
 const router = useRouter()
@@ -366,6 +366,7 @@ function download(backup: Backup) {
           <div class="detail-item" style="grid-column: span 2"><span class="detail-label">数据目录</span><span class="detail-value mono">{{ tenant.data_dir }}</span></div>
           <div class="detail-item" style="grid-column: span 2"><span class="detail-label">systemd 单元</span><span class="detail-value mono">{{ tenant.unit_name }}</span></div>
           <div class="detail-item"><span class="detail-label">最后健康检查</span><span class="detail-value">{{ formatTime(tenant.last_health_at) }}</span></div>
+          <div class="detail-item"><span class="detail-label">最近活跃</span><span class="detail-value">{{ formatAgo(tenant.last_active_at) }}</span></div>
           <div class="detail-item"><span class="detail-label">磁盘占用</span><span class="detail-value">{{ formatBytes(tenant.disk_bytes) }}</span></div>
         </div>
       </div>

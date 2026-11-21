@@ -142,6 +142,11 @@ func (s *Service) dailyLoop(ctx context.Context) {
 		if s.shouldRun("disk", 4) {
 			go s.RefreshDiskUsage(ctx)
 		}
+		// 最近活跃时间放在 7 点：要挨个打开每个实例的数据库，比健康检查重，
+		// 一天一次足够，也赶在管理员上班前把结果摆出来。
+		if s.shouldRun("activity", 7) {
+			go s.RefreshLastActive(ctx)
+		}
 		if s.shouldRun("trash", 5) {
 			go s.PurgeExpiredTrash(ctx)
 		}

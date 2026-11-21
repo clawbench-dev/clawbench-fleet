@@ -34,6 +34,7 @@ export interface Tenant {
   disk_checked_at: string
   last_health_at: string
   last_health_ok: boolean
+  last_active_at: string
   last_error: string
   created_at: string
   updated_at: string

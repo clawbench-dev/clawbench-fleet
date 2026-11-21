@@ -40,6 +40,13 @@ func (s *Service) TenantDetail(id int64) (*TenantDTO, error) {
 		}
 		cancel()
 	}
+	// 最近活跃时间同理：刚建好的实例还没被扫过时，详情页按需补一次，
+	// 免得一直显示“—”。已经有值就不再重复打开数据库。
+	if t.LastActiveAt == "" && t.Status != domain.StatusTrashed {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		s.RefreshTenantLastActive(ctx, t)
+		cancel()
+	}
 	dto := s.TenantDTO(*t)
 	return &dto, nil
 }
