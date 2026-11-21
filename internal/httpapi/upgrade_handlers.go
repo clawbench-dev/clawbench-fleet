@@ -35,7 +35,7 @@ func (s *Server) handleUploadVersion(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad_upload", "请选择 Clawbench 二进制文件")
 		return
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	v, err := s.svc.UploadVersion(r.Context(), header.Filename, file, 600<<20, auditCtx(r))
 	if err != nil {
 		writeServiceErr(w, err)
@@ -61,7 +61,7 @@ func (s *Server) handlePilot(w http.ResponseWriter, r *http.Request) {
 		writeServiceErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"tenant": s.svc.TenantDTO(*t)})
+	writeJSON(w, http.StatusOK, map[string]any{fieldTenant: s.svc.TenantDTO(*t)})
 }
 
 func (s *Server) handleApplyUpgrade(w http.ResponseWriter, r *http.Request) {
@@ -71,7 +71,7 @@ func (s *Server) handleApplyUpgrade(w http.ResponseWriter, r *http.Request) {
 		writeServiceErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"job": job})
+	writeJSON(w, http.StatusAccepted, map[string]any{fieldJob: job})
 }
 
 func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request) {
@@ -80,7 +80,7 @@ func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request) {
 		writeServiceErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"job": job})
+	writeJSON(w, http.StatusAccepted, map[string]any{fieldJob: job})
 }
 
 func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
@@ -98,7 +98,7 @@ func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
 		writeServiceErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"job": job})
+	writeJSON(w, http.StatusOK, map[string]any{fieldJob: job})
 }
 
 func (s *Server) handleJobArtifact(w http.ResponseWriter, r *http.Request) {

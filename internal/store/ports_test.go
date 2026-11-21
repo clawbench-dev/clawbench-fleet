@@ -32,7 +32,7 @@ func TestAllocatePorts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 	if err := st.SeedPorts(24000, 24010); err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +69,7 @@ func TestAllocatePortsExhausted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 	if err := st.SeedPorts(25000, 25002); err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +86,7 @@ func TestClaimPort(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 	if err := st.SeedPorts(26000, 26002); err != nil {
 		t.Fatal(err)
 	}

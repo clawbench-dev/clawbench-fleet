@@ -51,8 +51,8 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/health", s.handleHealth)
-	s.mux.HandleFunc("POST /api/auth/login", s.handleLogin)
-	s.mux.HandleFunc("POST /api/auth/logout", s.handleLogout)
+	s.mux.HandleFunc("POST /api/auth/login", s.sameOrigin(s.handleLogin))
+	s.mux.HandleFunc("POST /api/auth/logout", s.sameOrigin(s.handleLogout))
 	s.mux.HandleFunc("GET /api/auth/me", s.protected(s.handleMe))
 	s.mux.HandleFunc("POST /api/auth/password", s.protected(s.handleChangePassword))
 
@@ -108,6 +108,19 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/", s.serveStatic)
 }
 
+// sameOrigin rejects state-changing requests whose Origin header names another
+// host. Browsers always send Origin on cross-site writes, so this blocks a
+// malicious page from driving a logged-in admin's browser.
+func (s *Server) sameOrigin(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !sameOrigin(r) {
+			writeErr(w, http.StatusForbidden, "bad_origin", "请求来源不合法")
+			return
+		}
+		next(w, r)
+	}
+}
+
 func (s *Server) protected(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead && !sameOrigin(r) {
@@ -152,7 +165,26 @@ func sameOrigin(r *http.Request) bool {
 	if err != nil {
 		return false
 	}
-	return strings.EqualFold(u.Host, r.Host)
+	return equalHost(u.Host, r.Host)
+}
+
+// equalHost compares host:port pairs, treating a missing port as the scheme
+// default (80 for http, 443 for https) so "example.com" and "example.com:443"
+// are the same origin.
+func equalHost(a, b string) bool {
+	return hostWithoutDefaultPort(a) == hostWithoutDefaultPort(b)
+}
+
+func hostWithoutDefaultPort(host string) string {
+	host = strings.ToLower(strings.TrimSpace(host))
+	switch {
+	case strings.HasSuffix(host, ":443"), strings.HasSuffix(host, ":80"):
+		idx := strings.LastIndexByte(host, ':')
+		if !strings.Contains(host[idx+1:], ":") {
+			return host[:idx]
+		}
+	}
+	return host
 }
 
 func (s *Server) withHeaders(next http.Handler) http.Handler {
@@ -268,14 +300,14 @@ func clearSessionCookie(w http.ResponseWriter) {
 	})
 }
 
-func isNotFound(err error) bool { return false }
-
 func writeServiceErr(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		writeErr(w, http.StatusNotFound, "not_found", err.Error())
 	case errors.Is(err, store.ErrPortExhausted):
 		writeErr(w, http.StatusConflict, "port_exhausted", err.Error())
+	case errors.Is(err, fleet.ErrTenantNotFound):
+		writeErr(w, http.StatusNotFound, "not_found", err.Error())
 	default:
 		writeErr(w, http.StatusBadRequest, "operation_failed", err.Error())
 	}
@@ -343,8 +375,8 @@ type slidingLimiter struct {
 	window time.Duration
 }
 
-func newSlidingLimiter(max int, window time.Duration) *slidingLimiter {
-	return &slidingLimiter{m: map[string][]time.Time{}, max: max, window: window}
+func newSlidingLimiter(limit int, window time.Duration) *slidingLimiter {
+	return &slidingLimiter{m: map[string][]time.Time{}, max: limit, window: window}
 }
 
 func (l *slidingLimiter) allow(key string) bool {

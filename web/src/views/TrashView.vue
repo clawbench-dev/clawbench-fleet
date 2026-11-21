@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { AlertTriangle, RotateCcw, Trash2 } from 'lucide-vue-next'
-import { api } from '../api'
+import { api, errorMessage } from '../api'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import CopyField from '../components/CopyField.vue'
 import EmptyState from '../components/EmptyState.vue'
@@ -21,8 +21,8 @@ async function load() {
   try {
     const res = await api.get<{ items: TrashItem[] }>('/trash')
     items.value = res.items || []
-  } catch (e: any) {
-    toast(e?.message || '加载失败', 'error')
+  } catch (e) {
+    toast(errorMessage(e, '加载失败'), 'error')
   } finally {
     loading.value = false
   }
@@ -43,8 +43,8 @@ async function doRestore() {
     }
     if (res.warning) toast(res.warning, 'error')
     load()
-  } catch (e: any) {
-    toast(e?.message || '恢复失败', 'error')
+  } catch (e) {
+    toast(errorMessage(e, '恢复失败'), 'error')
   }
 }
 
@@ -56,8 +56,8 @@ async function doPurge() {
     await api.del(`/trash/${target.id}`)
     toast('已强制删除', 'success')
     load()
-  } catch (e: any) {
-    toast(e?.message || '删除失败', 'error')
+  } catch (e) {
+    toast(errorMessage(e, '删除失败'), 'error')
   }
 }
 </script>

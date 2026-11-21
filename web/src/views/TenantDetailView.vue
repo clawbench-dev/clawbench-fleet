@@ -15,7 +15,7 @@ import {
   Trash2,
   Wrench,
 } from 'lucide-vue-next'
-import { api, downloadFile } from '../api'
+import { api, downloadFile, errorMessage } from '../api'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import CopyField from '../components/CopyField.vue'
 import EmptyState from '../components/EmptyState.vue'
@@ -63,8 +63,8 @@ async function load(silent = false) {
       tasks_max: res.tenant.tasks_max,
     }
     error.value = ''
-  } catch (e: any) {
-    error.value = e?.message || '加载失败'
+  } catch (e) {
+    error.value = errorMessage(e, '加载失败')
   } finally {
     if (!silent) loading.value = false
   }
@@ -87,8 +87,8 @@ async function act(action: 'start' | 'stop' | 'restart') {
     const res = await api.post<{ tenant: Tenant }>(`/tenants/${id.value}/${action}`)
     tenant.value = res.tenant
     toast(`${labels[action]}成功`, 'success')
-  } catch (e: any) {
-    toast(e?.message || `${labels[action]}失败`, 'error')
+  } catch (e) {
+    toast(errorMessage(e, `${labels[action]}失败`), 'error')
   } finally {
     busy.value = ''
     load(true)
@@ -105,8 +105,8 @@ async function resetPassword() {
     password.value = res.password
     passwordTitle.value = '新的登录密码（只显示这一次）'
     if (res.warning) toast(res.warning, 'error')
-  } catch (e: any) {
-    toast(e?.message || '重置密码失败', 'error')
+  } catch (e) {
+    toast(errorMessage(e, '重置密码失败'), 'error')
   } finally {
     busy.value = ''
     load(true)
@@ -127,8 +127,8 @@ async function repair() {
       toast('修复完成', 'success')
     }
     if (res.warning) toast(res.warning, 'error')
-  } catch (e: any) {
-    toast(e?.message || '修复失败', 'error')
+  } catch (e) {
+    toast(errorMessage(e, '修复失败'), 'error')
   } finally {
     busy.value = ''
     load(true)
@@ -141,8 +141,8 @@ async function saveQuota() {
     const res = await api.patch<{ tenant: Tenant }>(`/tenants/${id.value}`, quota.value)
     tenant.value = res.tenant
     toast('资源上限已保存，实例已重启', 'success')
-  } catch (e: any) {
-    toast(e?.message || '保存失败', 'error')
+  } catch (e) {
+    toast(errorMessage(e, '保存失败'), 'error')
   } finally {
     busy.value = ''
     load(true)
@@ -154,8 +154,8 @@ async function loadLogs() {
   try {
     const res = await api.get<{ lines: string }>(`/tenants/${id.value}/logs?lines=500`)
     logs.value = res.lines || '（日志为空）'
-  } catch (e: any) {
-    toast(e?.message || '读取日志失败', 'error')
+  } catch (e) {
+    toast(errorMessage(e, '读取日志失败'), 'error')
   } finally {
     logsLoading.value = false
   }
@@ -168,8 +168,8 @@ async function loadAudit() {
       `/audit?tenant=${encodeURIComponent(tenant.value.username)}&page_size=30`,
     )
     audit.value = res.items
-  } catch (e: any) {
-    toast(e?.message || '读取操作记录失败', 'error')
+  } catch (e) {
+    toast(errorMessage(e, '读取操作记录失败'), 'error')
   }
 }
 
@@ -179,8 +179,8 @@ async function backupNow() {
     await api.post(`/tenants/${id.value}/backups`)
     toast('备份完成', 'success')
     load(true)
-  } catch (e: any) {
-    toast(e?.message || '备份失败', 'error')
+  } catch (e) {
+    toast(errorMessage(e, '备份失败'), 'error')
   } finally {
     busy.value = ''
   }
@@ -193,8 +193,8 @@ async function doRestore() {
     toast('已从备份恢复', 'success')
     restoreTarget.value = null
     load()
-  } catch (e: any) {
-    toast(e?.message || '恢复失败', 'error')
+  } catch (e) {
+    toast(errorMessage(e, '恢复失败'), 'error')
   }
 }
 
@@ -205,8 +205,8 @@ async function doRemoveBackup() {
     toast('备份已删除', 'success')
     removeBackupTarget.value = null
     load(true)
-  } catch (e: any) {
-    toast(e?.message || '删除失败', 'error')
+  } catch (e) {
+    toast(errorMessage(e, '删除失败'), 'error')
   }
 }
 
@@ -219,8 +219,8 @@ async function doDelete() {
     toast('已移入回收站，30 天内可以恢复', 'success')
     deleteDoneOpen.value = true
     load(true)
-  } catch (e: any) {
-    toast(e?.message || '删除失败', 'error')
+  } catch (e) {
+    toast(errorMessage(e, '删除失败'), 'error')
   }
 }
 
@@ -236,8 +236,8 @@ async function doForceDelete() {
     forceDeleteOpen.value = false
     toast('已强制删除，数据不可恢复', 'success')
     router.push('/tenants')
-  } catch (e: any) {
-    toast(e?.message || '强制删除失败', 'error')
+  } catch (e) {
+    toast(errorMessage(e, '强制删除失败'), 'error')
   }
 }
 
@@ -256,8 +256,8 @@ async function restoreFromTrash() {
     }
     if (res.warning) toast(res.warning, 'error')
     load(true)
-  } catch (e: any) {
-    toast(e?.message || '恢复失败', 'error')
+  } catch (e) {
+    toast(errorMessage(e, '恢复失败'), 'error')
   } finally {
     busy.value = ''
   }
@@ -265,7 +265,7 @@ async function restoreFromTrash() {
 
 function download(backup: Backup) {
   downloadFile(`/backups/${backup.id}/download`, `${backup.username}-${backup.id}.tar.gz`).catch((e) =>
-    toast(e?.message || '下载失败', 'error'),
+    toast(errorMessage(e, '下载失败'), 'error'),
   )
 }
 </script>

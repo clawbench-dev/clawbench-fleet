@@ -105,14 +105,14 @@ func (s *Service) InstallFromNpm(ctx context.Context, version string, ac AuditCo
 	if err := os.MkdirAll(prefix, 0o700); err != nil {
 		return nil, err
 	}
-	defer os.RemoveAll(prefix)
+	defer func() { _ = os.RemoveAll(prefix) }()
 
 	if err := s.Sys.NpmInstall(ctx, prefix, pkg, version, s.Cfg.Clawbench.NpmRegistry); err != nil {
 		return nil, fmt.Errorf("从 npm 安装 %s@%s 失败：%w", pkg, version, err)
 	}
-	src, err := locateNpmBinary(prefix, pkg)
-	if err != nil {
-		return nil, err
+	src, locateErr := locateNpmBinary(prefix, pkg)
+	if locateErr != nil {
+		return nil, locateErr
 	}
 
 	// Copy first, then validate the copy: the temporary npm tree is about to be
@@ -126,19 +126,19 @@ func (s *Service) InstallFromNpm(ctx context.Context, version string, ac AuditCo
 		_ = os.Remove(tmp)
 		return nil, err
 	}
-	if _, err := s.Store.GetVersion(label); err == nil {
+	if _, getErr := s.Store.GetVersion(label); getErr == nil {
 		_ = os.Remove(tmp)
 		return nil, fmt.Errorf("版本 %s 已经安装过了", label)
 	}
 	destDir := filepath.Join(s.Cfg.VersionsDir(), label)
-	if err := os.MkdirAll(destDir, 0o755); err != nil {
+	if mkdirErr := os.MkdirAll(destDir, 0o755); mkdirErr != nil {
 		_ = os.Remove(tmp)
-		return nil, err
+		return nil, mkdirErr
 	}
 	dest := filepath.Join(destDir, "clawbench")
-	if err := os.Rename(tmp, dest); err != nil {
+	if renameErr := os.Rename(tmp, dest); renameErr != nil {
 		_ = os.Remove(tmp)
-		return nil, err
+		return nil, renameErr
 	}
 	sum, err := hashFile(dest)
 	if err != nil {
@@ -159,7 +159,7 @@ func (s *Service) InstallFromNpm(ctx context.Context, version string, ac AuditCo
 		v.Status = "current"
 	}
 	s.Audit(ac, "upgrade.npm_install", nil, map[string]any{
-		"version": label, "npm_package": pkg, "npm_version": version, "sha256": sum,
+		fieldVersion: label, "npm_package": pkg, "npm_version": version, "sha256": sum,
 	}, nil)
 	return v, nil
 }

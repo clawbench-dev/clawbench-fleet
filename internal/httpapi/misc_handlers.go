@@ -37,7 +37,7 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"items": items, "total": total, "page": f.Page, "page_size": f.PageSize,
+		fieldItems: items, "total": total, "page": f.Page, "page_size": f.PageSize,
 	})
 }
 
@@ -58,7 +58,7 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
-	var next = s.svc.Settings()
+	next := s.svc.Settings()
 	if !decodeJSON(w, r, &next) {
 		return
 	}
@@ -92,7 +92,7 @@ func (s *Server) serveStatic(w http.ResponseWriter, r *http.Request) {
 		if ct := mime.TypeByExtension(path.Ext(name)); ct != "" {
 			w.Header().Set("Content-Type", ct)
 		}
-		_, _ = w.Write(data)
+		_, _ = w.Write(data) //nolint:gosec // data comes from the embedded frontend bundle, not user input
 		return
 	}
 	if path.Ext(name) != "" {

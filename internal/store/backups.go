@@ -27,7 +27,7 @@ func (s *Store) ListBackups(tenantID int64) ([]domain.Backup, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []domain.Backup
 	for rows.Next() {
 		var b domain.Backup
@@ -63,7 +63,7 @@ func (s *Store) BackupsOlderThan(tenantID int64, cutoff string) ([]domain.Backup
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []domain.Backup
 	for rows.Next() {
 		var b domain.Backup

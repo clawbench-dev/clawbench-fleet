@@ -152,13 +152,29 @@ func (s *Service) loadScanEnv(ctx context.Context) (*scanEnv, error) {
 // inspectUser turns one account into a candidate. ok is false for accounts
 // that are not tenants at all (no data directory, system accounts, ...).
 func (s *Service) inspectUser(ctx context.Context, env *scanEnv, u sysops.UserInfo) (AdoptCandidate, bool) {
-	if u.Username == "" || u.Username == "clawbench-fleet" {
+	if !isTenantAccount(u) {
 		return AdoptCandidate{}, false
 	}
-	if u.Home == "" || u.Home == "/" {
+	c := s.baseCandidate(env, u)
+	unitContent := s.unitContentFor(ctx, env, &c)
+	c.DataDir = resolveDataDir(u, unitContent, env.listeners[u.Username])
+	if !dirExists(c.DataDir) {
 		return AdoptCandidate{}, false
 	}
-	c := AdoptCandidate{
+	if dirs := listenerDataDirs(env.listeners[u.Username]); len(dirs) > 1 {
+		c.Warnings = append(c.Warnings, fmt.Sprintf("这个用户同时跑了多个实例（%d 个数据目录），平台按 %s 纳管", len(dirs), c.DataDir))
+	}
+	applyUnitSettings(&c, unitContent)
+	return c, true
+}
+
+// isTenantAccount filters out system accounts and the platform's own account.
+func isTenantAccount(u sysops.UserInfo) bool {
+	return u.Username != "" && u.Username != "clawbench-fleet" && u.Home != "" && u.Home != "/"
+}
+
+func (s *Service) baseCandidate(env *scanEnv, u sysops.UserInfo) AdoptCandidate {
+	return AdoptCandidate{
 		Username:       u.Username,
 		DisplayName:    gecosName(u.Gecos),
 		UID:            u.UID,
@@ -168,30 +184,36 @@ func (s *Service) inspectUser(ctx context.Context, env *scanEnv, u sysops.UserIn
 		AlreadyManaged: env.managed[u.Username],
 		Protected:      domain.ProtectedUsername(u.Username),
 	}
-	var unitContent string
-	if env.unitSet[c.UnitName] {
-		c.UnitExists = true
-		unitContent, _ = s.Sys.ReadUnit(ctx, c.UnitName)
-	}
-	c.DataDir = filepath.Join(u.Home, ".clawbench")
-	if m := unitDataRe.FindStringSubmatch(unitContent); len(m) == 2 {
-		c.DataDir = m[1]
-	}
-	dirs := listenerDataDirs(env.listeners[u.Username])
-	if !dirExists(c.DataDir) && len(dirs) > 0 {
-		// An instance started with --data-dir outside the home directory is
-		// still a tenant; fall back to the directory it is running from.
-		c.DataDir = dirs[0]
-	}
-	if !dirExists(c.DataDir) {
-		return AdoptCandidate{}, false
-	}
-	if len(dirs) > 1 {
-		c.Warnings = append(c.Warnings, fmt.Sprintf("这个用户同时跑了多个实例（%d 个数据目录），平台按 %s 纳管", len(dirs), c.DataDir))
-	}
+}
 
-	// An existing systemd unit states the port the instance was started with;
-	// the config file is the fallback for instances without a unit.
+// unitContentFor reads the systemd unit when one exists and records that fact
+// on the candidate. A missing unit is not an error: the config file is enough.
+func (s *Service) unitContentFor(ctx context.Context, env *scanEnv, c *AdoptCandidate) string {
+	if !env.unitSet[c.UnitName] {
+		return ""
+	}
+	c.UnitExists = true
+	content, _ := s.Sys.ReadUnit(ctx, c.UnitName)
+	return content
+}
+
+// resolveDataDir prefers the --data-dir recorded in the unit, then the home
+// directory default, and finally a directory seen in a listening process.
+func resolveDataDir(u sysops.UserInfo, unitContent string, listeners []sysops.Listener) string {
+	dir := filepath.Join(u.Home, ".clawbench")
+	if m := unitDataRe.FindStringSubmatch(unitContent); len(m) == 2 {
+		dir = m[1]
+	}
+	dirs := listenerDataDirs(listeners)
+	if !dirExists(dir) && len(dirs) > 0 {
+		dir = dirs[0]
+	}
+	return dir
+}
+
+// applyUnitSettings copies the limits the instance was started with. The unit
+// wins; the config file is the fallback for the port only.
+func applyUnitSettings(c *AdoptCandidate, unitContent string) {
 	c.PortSource = "配置文件"
 	if m := unitPortRe.FindStringSubmatch(unitContent); len(m) == 2 {
 		c.Port, _ = strconv.Atoi(m[1])
@@ -208,7 +230,6 @@ func (s *Service) inspectUser(ctx context.Context, env *scanEnv, u sysops.UserIn
 	if m := unitTasksRe.FindStringSubmatch(unitContent); len(m) == 2 {
 		c.TasksMax, _ = strconv.Atoi(m[1])
 	}
-	return c, true
 }
 
 // enrichCandidates finds the instance that is actually running for each
@@ -322,20 +343,30 @@ func (s *Service) findLiveInstance(ctx context.Context, listeners []sysops.Liste
 }
 
 func (s *Service) finalizeCandidate(c *AdoptCandidate) {
+	c.Blocked = s.candidateBlockedReason(c)
+	s.addCandidateWarnings(c)
+}
+
+// candidateBlockedReason returns why an account cannot be adopted, or "".
+func (s *Service) candidateBlockedReason(c *AdoptCandidate) string {
 	switch {
 	case c.AlreadyManaged:
-		c.Blocked = "已经在管理列表里"
+		return "已经在管理列表里"
 	case c.Port == 0:
-		c.Blocked = "找不到端口：进程没在跑，配置文件和 systemd 单元里也没有端口"
+		return "找不到端口：进程没在跑，配置文件和 systemd 单元里也没有端口"
 	case !configExists(c.DataDir):
-		c.Blocked = "数据目录里没有 config.yaml，纳管会丢掉原有密码，暂不纳管"
+		return "数据目录里没有 config.yaml，纳管会丢掉原有密码，暂不纳管"
 	case s.portTaken(c.Port):
-		c.Blocked = fmt.Sprintf("端口 %d 已经被其他租户占用", c.Port)
+		return fmt.Sprintf("端口 %d 已经被其他租户占用", c.Port)
 	case c.ServiceActive && !c.HealthOK:
-		c.Blocked = fmt.Sprintf("端口 %d 上的实例没响应 HTTP 健康检查（可能启用了 HTTPS 或还没启动完），平台按 HTTP 管理，暂不纳管", c.Port)
+		return fmt.Sprintf("端口 %d 上的实例没响应 HTTP 健康检查（可能启用了 HTTPS 或还没启动完），平台按 HTTP 管理，暂不纳管", c.Port)
 	case !s.clawbenchBinaryReady():
-		c.Blocked = "平台还没有安装可用的 Clawbench 版本，请先到升级中心安装再纳管"
+		return "平台还没有安装可用的 Clawbench 版本，请先到升级中心安装再纳管"
 	}
+	return ""
+}
+
+func (s *Service) addCandidateWarnings(c *AdoptCandidate) {
 	if c.Protected {
 		c.Warnings = append(c.Warnings, "root 是系统账号，纳入后不能删除")
 	}
@@ -430,11 +461,54 @@ func (s *Service) adoptOne(ctx context.Context, username string, ac AuditContext
 		res.Error = "已经在管理列表里"
 		return res
 	}
-	env, err := s.loadScanEnv(ctx)
-	if err != nil {
+	env, envErr := s.loadScanEnv(ctx)
+	if envErr != nil {
+		res.Error = envErr.Error()
+		return res
+	}
+	c, blocked := s.findCandidate(ctx, env, username)
+	if blocked != "" {
+		res.Error = blocked
+		return res
+	}
+	if err := s.acquire(ctx); err != nil {
 		res.Error = err.Error()
 		return res
 	}
+	defer s.release()
+
+	t, insertErr := s.insertAdoptedTenant(c)
+	if insertErr != "" {
+		res.Error = insertErr
+		return res
+	}
+	res.TenantID = t.ID
+
+	// An empty password keeps the employee's existing password: adoption must
+	// not silently lock anyone out.
+	if err := s.writeTenantConfig(t, ""); err != nil {
+		_ = s.Store.DeleteTenant(t.ID)
+		_ = s.Store.ReleasePorts(t.ID)
+		res.Error = "写租户配置失败：" + err.Error()
+		return res
+	}
+	if failed, err := s.startAdoptedTenant(ctx, t, c.UnitActive, ac); err != nil {
+		return failed
+	}
+	t.Status = domain.StatusRunning
+	t.LastHealthOK = true
+	t.LastHealthAt = time.Now().Format(time.RFC3339)
+	t.LastError = ""
+	_ = s.Store.UpdateTenant(t)
+	s.Audit(ac, "tenant.adopt", t, map[string]any{fieldPort: t.Port, fieldUID: t.UID}, nil)
+	res.Status = domain.StatusRunning
+	return res
+}
+
+// findCandidate re-inspects one account so a client cannot adopt a username
+// that was never scanned. The returned string is the reason it cannot be
+// adopted, or "" when it can.
+func (s *Service) findCandidate(ctx context.Context, env *scanEnv, username string) (AdoptCandidate, string) {
 	var target *sysops.UserInfo
 	for i := range env.users {
 		if env.users[i].Username == username {
@@ -443,28 +517,20 @@ func (s *Service) adoptOne(ctx context.Context, username string, ac AuditContext
 		}
 	}
 	if target == nil {
-		res.Error = "系统里没有这个用户"
-		return res
+		return AdoptCandidate{}, "系统里没有这个用户"
 	}
 	c, ok := s.inspectUser(ctx, env, *target)
 	if !ok {
-		res.Error = "这个用户没有 Clawbench 数据目录"
-		return res
+		return AdoptCandidate{}, "这个用户没有 Clawbench 数据目录"
 	}
 	cands := []AdoptCandidate{c}
 	s.enrichCandidates(ctx, env, cands)
-	c = cands[0]
-	if c.Blocked != "" {
-		res.Error = c.Blocked
-		return res
-	}
+	return cands[0], cands[0].Blocked
+}
 
-	if err := s.acquire(ctx); err != nil {
-		res.Error = err.Error()
-		return res
-	}
-	defer s.release()
-
+// insertAdoptedTenant writes the tenant row and claims its port atomically.
+// The returned string is an error message for the per-tenant result.
+func (s *Service) insertAdoptedTenant(c AdoptCandidate) (*domain.Tenant, string) {
 	st := s.Settings()
 	t := &domain.Tenant{
 		Username:    c.Username,
@@ -481,43 +547,34 @@ func (s *Service) adoptOne(ctx context.Context, username string, ac AuditContext
 		UnitName:    s.Cfg.UnitName(c.Username),
 		Notes:       "从已有实例纳入",
 	}
-
 	s.createMu.Lock()
+	defer s.createMu.Unlock()
 	if err := s.Store.CreateTenant(t); err != nil {
-		s.createMu.Unlock()
-		res.Error = err.Error()
-		return res
+		return nil, err.Error()
 	}
 	if err := s.Store.ClaimPort(t.Port, t.ID); err != nil {
 		_ = s.Store.DeleteTenant(t.ID)
-		s.createMu.Unlock()
-		res.Error = err.Error()
-		return res
+		return nil, err.Error()
 	}
-	s.createMu.Unlock()
-	res.TenantID = t.ID
+	return t, ""
+}
 
-	// An empty password keeps the employee's existing password: adoption must
-	// not silently lock anyone out.
-	if err := s.writeTenantConfig(t, ""); err != nil {
-		_ = s.Store.DeleteTenant(t.ID)
-		_ = s.Store.ReleasePorts(t.ID)
-		res.Error = "写租户配置失败：" + err.Error()
-		return res
-	}
+// startAdoptedTenant writes the unit, takes over any running process and waits
+// for the health check. On failure it returns the failed-adoption result.
+func (s *Service) startAdoptedTenant(ctx context.Context, t *domain.Tenant, unitActive bool, ac AuditContext) (AdoptResult, error) {
+	res := AdoptResult{Username: t.Username, TenantID: t.ID}
 	if err := s.writeUnit(ctx, t); err != nil {
-		return s.adoptFailed(t, res, "写 systemd 单元失败", err, ac)
+		return s.adoptFailed(t, res, "写 systemd 单元失败", err, ac), err
 	}
 	if err := s.reloadUnits(ctx); err != nil {
-		return s.adoptFailed(t, res, "systemd 重载失败", err, ac)
+		return s.adoptFailed(t, res, "systemd 重载失败", err, ac), err
 	}
 	if err := s.Sys.Enable(ctx, t.UnitName); err != nil {
-		return s.adoptFailed(t, res, "启用服务失败", err, ac)
+		return s.adoptFailed(t, res, "启用服务失败", err, ac), err
 	}
-
-	if c.UnitActive {
+	if unitActive {
 		if err := s.Sys.Restart(ctx, t.UnitName); err != nil {
-			return s.adoptFailed(t, res, "接管后重启失败", err, ac)
+			return s.adoptFailed(t, res, "接管后重启失败", err, ac), err
 		}
 	} else {
 		// The instance may have been started by hand, or by an older unit with
@@ -525,27 +582,19 @@ func (s *Service) adoptOne(ctx context.Context, username string, ac AuditContext
 		// anything else is reported, never killed.
 		if portListening(t.Port) {
 			if err := s.Sys.StopPortOwner(ctx, t.Port, t.Username); err != nil {
-				return s.adoptFailed(t, res, "停掉旧进程失败", err, ac)
+				return s.adoptFailed(t, res, "停掉旧进程失败", err, ac), err
 			}
 		}
 		if err := s.Sys.Start(ctx, t.UnitName); err != nil {
-			return s.adoptFailed(t, res, "接管后启动失败", err, ac)
+			return s.adoptFailed(t, res, "接管后启动失败", err, ac), err
 		}
 	}
-
 	info, err := s.waitHealthy(ctx, t.Port, "", 45*time.Second)
 	if err != nil {
-		return s.adoptFailed(t, res, "接管后健康检查失败", err, ac)
+		return s.adoptFailed(t, res, "接管后健康检查失败", err, ac), err
 	}
-	t.Status = domain.StatusRunning
 	t.Version = info.Version
-	t.LastHealthOK = true
-	t.LastHealthAt = time.Now().Format(time.RFC3339)
-	t.LastError = ""
-	_ = s.Store.UpdateTenant(t)
-	s.Audit(ac, "tenant.adopt", t, map[string]any{"port": t.Port, "uid": t.UID}, nil)
-	res.Status = domain.StatusRunning
-	return res
+	return res, nil
 }
 
 func (s *Service) adoptFailed(t *domain.Tenant, res AdoptResult, action string, cause error, ac AuditContext) AdoptResult {
@@ -553,7 +602,7 @@ func (s *Service) adoptFailed(t *domain.Tenant, res AdoptResult, action string, 
 	t.LastError = action + "：" + cause.Error()
 	t.LastHealthOK = false
 	_ = s.Store.UpdateTenant(t)
-	s.Audit(ac, "tenant.adopt", t, map[string]any{"port": t.Port}, cause)
+	s.Audit(ac, "tenant.adopt", t, map[string]any{fieldPort: t.Port}, cause)
 	res.Status = domain.StatusError
 	res.Error = action + "：" + cause.Error()
 	return res
@@ -590,7 +639,7 @@ func gecosName(gecos string) string {
 }
 
 func portListening(port int) bool {
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 400*time.Millisecond)
+	conn, err := (&net.Dialer{Timeout: 400 * time.Millisecond}).DialContext(context.Background(), "tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
 		return false
 	}

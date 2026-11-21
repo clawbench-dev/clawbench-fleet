@@ -122,7 +122,7 @@ func (s *Store) ListTenants(f TenantFilter) ([]domain.Tenant, int, error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	out := []domain.Tenant{}
 	for rows.Next() {
 		t, err := scanTenant(rows)
@@ -147,7 +147,7 @@ func (s *Store) ListTenantsByStatus(statuses ...string) ([]domain.Tenant, error)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []domain.Tenant
 	for rows.Next() {
 		t, err := scanTenant(rows)
@@ -171,7 +171,7 @@ func (s *Store) AllTenantUIDs() (map[int]bool, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	out := map[int]bool{}
 	for rows.Next() {
 		var uid int
@@ -219,7 +219,7 @@ func (s *Store) CountByStatus() (map[string]int, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	out := map[string]int{}
 	for rows.Next() {
 		var status string

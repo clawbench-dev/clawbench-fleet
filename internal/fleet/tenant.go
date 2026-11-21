@@ -121,7 +121,7 @@ func (s *Service) CreateTenant(ctx context.Context, in CreateTenantInput, ac Aud
 	}
 	fresh, err := s.Store.GetTenant(t.ID)
 	if err != nil {
-		return t, password, nil
+		return t, password, err
 	}
 	if fresh.Status == domain.StatusError {
 		return fresh, password, fmt.Errorf("实例已创建但未就绪：%s", fresh.LastError)
@@ -150,12 +150,12 @@ func (s *Service) CreateTenantAsync(ctx context.Context, in CreateTenantInput, a
 		}
 		return nil, "", fmt.Errorf("登录名 %s 已存在", username)
 	}
-	exists, err := s.Sys.UserExists(ctx, username)
-	if err != nil {
-		return nil, "", err
+	exists, existsErr := s.Sys.UserExists(ctx, username)
+	if existsErr != nil {
+		return nil, "", existsErr
 	}
 	if exists {
-		return nil, "", fmt.Errorf("Linux 用户 %s 已存在", username)
+		return nil, "", fmt.Errorf("系统用户 %s 已存在", username)
 	}
 	if err := s.acquire(ctx); err != nil {
 		return nil, "", err
@@ -163,16 +163,16 @@ func (s *Service) CreateTenantAsync(ctx context.Context, in CreateTenantInput, a
 	defer s.release()
 
 	st := s.Settings()
-	uid, err := s.allocateUID(ctx)
-	if err != nil {
-		return nil, "", err
+	uid, uidErr := s.allocateUID(ctx)
+	if uidErr != nil {
+		return nil, "", uidErr
 	}
 
 	s.createMu.Lock()
-	ports, err := s.Store.AllocatePorts(st.PortStart, st.PortEnd, st.PortsPerTenant, 0)
-	if err != nil {
+	ports, portsErr := s.Store.AllocatePorts(st.PortStart, st.PortEnd, st.PortsPerTenant, 0)
+	if portsErr != nil {
 		s.createMu.Unlock()
-		return nil, "", err
+		return nil, "", portsErr
 	}
 	t := &domain.Tenant{
 		Username:    username,
@@ -238,7 +238,7 @@ func (s *Service) startProvision(t *domain.Tenant, password string, ac AuditCont
 			if r := recover(); r != nil {
 				msg := fmt.Sprintf("创建过程意外中断：%v", r)
 				_ = s.Store.SetTenantStatus(snapshot.ID, domain.StatusError, msg)
-				s.Audit(ac, "tenant.create", &snapshot, map[string]any{"port": snapshot.Port, "uid": snapshot.UID}, errors.New(msg))
+				s.Audit(ac, "tenant.create", &snapshot, map[string]any{fieldPort: snapshot.Port, fieldUID: snapshot.UID}, errors.New(msg))
 			}
 			s.provisioners.mu.Lock()
 			delete(s.provisioners.done, snapshot.ID)
@@ -283,36 +283,36 @@ func (s *Service) waitForCreation(ctx context.Context, id int64, timeout time.Du
 // the operator can see what went wrong and retry or clean up.
 func (s *Service) provisionTenant(ctx context.Context, t *domain.Tenant, password string, ac AuditContext) {
 	if err := s.Sys.CreateUser(ctx, t.Username, t.UID); err != nil {
-		s.failCreate(ctx, t, ac, fmt.Errorf("创建 Linux 用户失败：%w", err))
+		s.failCreate(t, ac, fmt.Errorf("创建 Linux 用户失败：%w", err))
 		return
 	}
 	if uid, gid, err := s.Sys.LookupIDs(ctx, t.Username); err == nil {
 		t.UID, t.GID = uid, gid
 	}
 	if err := s.writeTenantConfig(t, password); err != nil {
-		s.failCreate(ctx, t, ac, fmt.Errorf("写租户配置失败：%w", err))
+		s.failCreate(t, ac, fmt.Errorf("写租户配置失败：%w", err))
 		return
 	}
 	if err := s.writeUnit(ctx, t); err != nil {
-		s.failCreate(ctx, t, ac, fmt.Errorf("写 systemd 单元失败：%w", err))
+		s.failCreate(t, ac, fmt.Errorf("写 systemd 单元失败：%w", err))
 		return
 	}
 	if err := s.reloadUnits(ctx); err != nil {
-		s.failCreate(ctx, t, ac, fmt.Errorf("systemd 重载失败：%w", err))
+		s.failCreate(t, ac, fmt.Errorf("systemd 重载失败：%w", err))
 		return
 	}
 	if err := s.Sys.Enable(ctx, t.UnitName); err != nil {
-		s.failCreate(ctx, t, ac, fmt.Errorf("启用服务失败：%w", err))
+		s.failCreate(t, ac, fmt.Errorf("启用服务失败：%w", err))
 		return
 	}
 	if err := s.Sys.Start(ctx, t.UnitName); err != nil {
-		s.failCreate(ctx, t, ac, fmt.Errorf("启动服务失败：%w", err))
+		s.failCreate(t, ac, fmt.Errorf("启动服务失败：%w", err))
 		return
 	}
 
 	info, err := s.waitHealthy(ctx, t.Port, "", 60*time.Second)
 	if err != nil {
-		s.failCreate(ctx, t, ac, fmt.Errorf("实例已创建但未就绪：%w", err))
+		s.failCreate(t, ac, fmt.Errorf("实例已创建但未就绪：%w", err))
 		return
 	}
 
@@ -322,20 +322,20 @@ func (s *Service) provisionTenant(ctx context.Context, t *domain.Tenant, passwor
 	t.LastHealthAt = time.Now().Format(time.RFC3339)
 	t.LastError = ""
 	_ = s.Store.UpdateTenant(t)
-	s.Audit(ac, "tenant.create", t, map[string]any{"port": t.Port, "uid": t.UID}, nil)
+	s.Audit(ac, "tenant.create", t, map[string]any{fieldPort: t.Port, fieldUID: t.UID}, nil)
 }
 
 // failCreate records why a creation stopped. The tenant stays in the list
 // with an error so the operator can see it and clean up; the Linux user and
 // any unit that were created are left alone because partially built state is
 // easier to inspect than state that silently vanished.
-func (s *Service) failCreate(ctx context.Context, t *domain.Tenant, ac AuditContext, err error) {
+func (s *Service) failCreate(t *domain.Tenant, ac AuditContext, err error) {
 	t.Status = domain.StatusError
 	t.LastError = err.Error()
 	t.LastHealthOK = false
 	t.LastHealthAt = time.Now().Format(time.RFC3339)
 	_ = s.Store.UpdateTenant(t)
-	s.Audit(ac, "tenant.create", t, map[string]any{"port": t.Port, "uid": t.UID}, err)
+	s.Audit(ac, "tenant.create", t, map[string]any{fieldPort: t.Port, fieldUID: t.UID}, err)
 }
 
 // rollbackCreate undoes whatever exists for a tenant whose record was already
@@ -382,9 +382,9 @@ type UpdateTenantInput struct {
 }
 
 func (s *Service) UpdateTenant(ctx context.Context, id int64, in UpdateTenantInput, ac AuditContext) (*domain.Tenant, error) {
-	t, err := s.tenantByID(id)
-	if err != nil {
-		return nil, err
+	t, getErr := s.tenantByID(id)
+	if getErr != nil {
+		return nil, getErr
 	}
 	unlock := s.lockTenant(t.Username)
 	defer unlock()
@@ -423,12 +423,12 @@ func (s *Service) UpdateTenant(ctx context.Context, id int64, in UpdateTenantInp
 			_ = s.failTenant(t, "tenant.update", "修改配额后重启失败", err, ac)
 			return t, err
 		}
-		if info, err := s.waitHealthy(ctx, t.Port, "", 45*time.Second); err != nil {
+		info, err := s.waitHealthy(ctx, t.Port, "", 45*time.Second)
+		if err != nil {
 			_ = s.failTenant(t, "tenant.update", "修改配额后健康检查失败", err, ac)
 			return t, err
-		} else {
-			t.Version = info.Version
 		}
+		t.Version = info.Version
 	}
 	t.LastError = ""
 	_ = s.Store.UpdateTenant(t)
@@ -452,9 +452,9 @@ func (s *Service) Logs(ctx context.Context, id int64, lines int, ac AuditContext
 }
 
 func (s *Service) StartTenant(ctx context.Context, id int64, ac AuditContext) (*domain.Tenant, error) {
-	t, err := s.tenantByID(id)
-	if err != nil {
-		return nil, err
+	t, getErr := s.tenantByID(id)
+	if getErr != nil {
+		return nil, getErr
 	}
 	unlock := s.lockTenant(t.Username)
 	defer unlock()
@@ -487,9 +487,9 @@ func (s *Service) StartTenant(ctx context.Context, id int64, ac AuditContext) (*
 }
 
 func (s *Service) StopTenant(ctx context.Context, id int64, ac AuditContext) (*domain.Tenant, error) {
-	t, err := s.tenantByID(id)
-	if err != nil {
-		return nil, err
+	t, getErr := s.tenantByID(id)
+	if getErr != nil {
+		return nil, getErr
 	}
 	unlock := s.lockTenant(t.Username)
 	defer unlock()
@@ -512,9 +512,9 @@ func (s *Service) StopTenant(ctx context.Context, id int64, ac AuditContext) (*d
 }
 
 func (s *Service) RestartTenant(ctx context.Context, id int64, ac AuditContext) (*domain.Tenant, error) {
-	t, err := s.tenantByID(id)
-	if err != nil {
-		return nil, err
+	t, getErr := s.tenantByID(id)
+	if getErr != nil {
+		return nil, getErr
 	}
 	unlock := s.lockTenant(t.Username)
 	defer unlock()
@@ -549,9 +549,9 @@ func (s *Service) failTenant(t *domain.Tenant, auditAction, action string, cause
 }
 
 func (s *Service) ResetPassword(ctx context.Context, id int64, ac AuditContext) (*domain.Tenant, string, error) {
-	t, err := s.tenantByID(id)
-	if err != nil {
-		return nil, "", err
+	t, getErr := s.tenantByID(id)
+	if getErr != nil {
+		return nil, "", getErr
 	}
 	unlock := s.lockTenant(t.Username)
 	defer unlock()
@@ -559,14 +559,16 @@ func (s *Service) ResetPassword(ctx context.Context, id int64, ac AuditContext) 
 		return nil, "", err
 	}
 	defer s.release()
-	password, err := GeneratePassword(12)
-	if err != nil {
-		return nil, "", err
+	password, genErr := GeneratePassword(12)
+	if genErr != nil {
+		return nil, "", genErr
 	}
 	if t.UID == 0 {
-		if t.UID, t.GID, err = s.Sys.LookupIDs(ctx, t.Username); err != nil {
-			return nil, "", err
+		uid, gid, lookupErr := s.Sys.LookupIDs(ctx, t.Username)
+		if lookupErr != nil {
+			return nil, "", lookupErr
 		}
+		t.UID, t.GID = uid, gid
 	}
 	if err := s.writeTenantConfig(t, password); err != nil {
 		return nil, "", fmt.Errorf("写配置失败：%w", err)
@@ -575,12 +577,12 @@ func (s *Service) ResetPassword(ctx context.Context, id int64, ac AuditContext) 
 		_ = s.failTenant(t, "tenant.reset_password", "重置密码后重启失败", err, ac)
 		return t, password, fmt.Errorf("新密码已写入，但重启失败：%w", err)
 	}
-	if info, err := s.waitHealthy(ctx, t.Port, "", 45*time.Second); err != nil {
+	info, err := s.waitHealthy(ctx, t.Port, "", 45*time.Second)
+	if err != nil {
 		_ = s.failTenant(t, "tenant.reset_password", "重置密码后健康检查失败", err, ac)
 		return t, password, fmt.Errorf("新密码已写入，但实例未就绪：%w", err)
-	} else {
-		t.Version = info.Version
 	}
+	t.Version = info.Version
 	t.Status = domain.StatusRunning
 	t.LastHealthOK = true
 	t.LastHealthAt = time.Now().Format(time.RFC3339)
@@ -591,9 +593,9 @@ func (s *Service) ResetPassword(ctx context.Context, id int64, ac AuditContext) 
 }
 
 func (s *Service) RepairTenant(ctx context.Context, id int64, ac AuditContext) (*domain.Tenant, string, error) {
-	t, err := s.tenantByID(id)
-	if err != nil {
-		return nil, "", err
+	t, getErr := s.tenantByID(id)
+	if getErr != nil {
+		return nil, "", getErr
 	}
 	unlock := s.lockTenant(t.Username)
 	defer unlock()
@@ -603,15 +605,19 @@ func (s *Service) RepairTenant(ctx context.Context, id int64, ac AuditContext) (
 	defer s.release()
 
 	if t.UID == 0 {
-		if t.UID, t.GID, err = s.Sys.LookupIDs(ctx, t.Username); err != nil {
-			return nil, "", fmt.Errorf("Linux 用户不存在，无法修复：%w", err)
+		uid, gid, lookupErr := s.Sys.LookupIDs(ctx, t.Username)
+		if lookupErr != nil {
+			return nil, "", fmt.Errorf("系统用户不存在，无法修复：%w", lookupErr)
 		}
+		t.UID, t.GID = uid, gid
 	}
 	newPassword := ""
-	if _, err := os.Stat(s.tenantConfigPath(t)); errors.Is(err, os.ErrNotExist) {
-		if newPassword, err = GeneratePassword(12); err != nil {
-			return nil, "", err
+	if _, statErr := os.Stat(s.tenantConfigPath(t)); errors.Is(statErr, os.ErrNotExist) {
+		generated, genErr := GeneratePassword(12)
+		if genErr != nil {
+			return nil, "", genErr
 		}
+		newPassword = generated
 	}
 	if err := s.writeTenantConfig(t, newPassword); err != nil {
 		return nil, "", err
@@ -653,9 +659,9 @@ type trashMeta struct {
 }
 
 func (s *Service) DeleteTenant(ctx context.Context, id int64, confirmName string, ac AuditContext) (*domain.Tenant, error) {
-	t, err := s.tenantByID(id)
-	if err != nil {
-		return nil, err
+	t, getErr := s.tenantByID(id)
+	if getErr != nil {
+		return nil, getErr
 	}
 	if domain.ProtectedUsername(t.Username) {
 		return nil, errors.New("root 是系统账号，不允许删除")
@@ -721,9 +727,9 @@ func (s *Service) DeleteTenant(ctx context.Context, id int64, confirmName string
 }
 
 func (s *Service) RestoreTenant(ctx context.Context, id int64, ac AuditContext) (*domain.Tenant, string, error) {
-	t, err := s.tenantByID(id)
-	if err != nil {
-		return nil, "", err
+	t, getErr := s.tenantByID(id)
+	if getErr != nil {
+		return nil, "", getErr
 	}
 	if t.Status != domain.StatusTrashed {
 		return nil, "", errors.New("这个租户不在回收站里")
@@ -735,81 +741,31 @@ func (s *Service) RestoreTenant(ctx context.Context, id int64, ac AuditContext) 
 	}
 	defer s.release()
 
-	if existing, err := s.Store.GetTenantByUsername(t.Username); err == nil && existing.ID != t.ID {
+	if existing, lookupErr := s.Store.GetTenantByUsername(t.Username); lookupErr == nil && existing.ID != t.ID {
 		return nil, "", errors.New("同名租户已存在，不能恢复")
 	}
-	if exists, err := s.Sys.UserExists(ctx, t.Username); err != nil {
-		return nil, "", err
-	} else if exists {
+	exists, existsErr := s.Sys.UserExists(ctx, t.Username)
+	if existsErr != nil {
+		return nil, "", existsErr
+	}
+	if exists {
 		return nil, "", errors.New("同名 Linux 用户已存在，不能恢复")
 	}
 
 	meta := trashMeta{}
-	if data, err := os.ReadFile(filepath.Join(t.TrashPath, "meta.json")); err == nil {
+	if data, readErr := os.ReadFile(filepath.Join(t.TrashPath, "meta.json")); readErr == nil {
 		_ = json.Unmarshal(data, &meta)
 	}
-	uid := t.UID
-	if meta.UID > 0 {
-		uid = meta.UID
+	uid, uidErr := s.restoreUID(ctx, t, meta)
+	if uidErr != nil {
+		return nil, "", uidErr
 	}
-	if uid == 0 {
-		if uid, err = s.allocateUID(ctx); err != nil {
-			return nil, "", err
-		}
-	} else {
-		used, _ := s.Sys.UsedUIDs(ctx)
-		if dbUIDs, err := s.Store.AllTenantUIDs(); err == nil {
-			for u := range dbUIDs {
-				if u != uid {
-					used[u] = true
-				}
-			}
-		}
-		if used[uid] {
-			if uid, err = s.allocateUID(ctx); err != nil {
-				return nil, "", err
-			}
-		}
-	}
-	if err := s.Sys.CreateUser(ctx, t.Username, uid); err != nil {
-		return nil, "", fmt.Errorf("重建 Linux 用户失败：%w", err)
-	}
-	trashHome := filepath.Join(t.TrashPath, "home")
-	if err := movePath(trashHome, t.HomeDir); err != nil {
-		_ = s.Sys.DeleteUser(ctx, t.Username)
-		return nil, "", fmt.Errorf("移回家目录失败：%w", err)
-	}
-	if actualUID, gid, err := s.Sys.LookupIDs(ctx, t.Username); err == nil {
-		t.UID, t.GID = actualUID, gid
-	}
-	_ = s.Sys.Chown(ctx, t.HomeDir, t.UID, t.GID)
-
-	newPassword := ""
-	if _, err := os.Stat(s.tenantConfigPath(t)); errors.Is(err, os.ErrNotExist) {
-		if newPassword, err = GeneratePassword(12); err != nil {
-			return nil, "", err
-		}
-	}
-	if err := s.writeTenantConfig(t, newPassword); err != nil {
+	if err := s.restoreAccount(ctx, t, uid); err != nil {
 		return nil, "", err
 	}
-	if err := s.writeUnit(ctx, t); err != nil {
-		return nil, "", err
-	}
-	if err := s.reloadUnits(ctx); err != nil {
-		return nil, "", err
-	}
-	if err := s.Sys.Enable(ctx, t.UnitName); err != nil {
-		return nil, "", err
-	}
-	if err := s.Sys.Start(ctx, t.UnitName); err != nil {
-		_ = s.failTenant(t, "tenant.restore", "恢复后启动失败", err, ac)
-		return t, newPassword, err
-	}
-	info, err := s.waitHealthy(ctx, t.Port, "", 45*time.Second)
-	if err != nil {
-		_ = s.failTenant(t, "tenant.restore", "恢复后健康检查失败", err, ac)
-		return t, newPassword, err
+	info, newPassword, startErr := s.startRestoredTenant(ctx, t, ac)
+	if startErr != nil {
+		return t, newPassword, startErr
 	}
 	t.Status = domain.StatusRunning
 	t.Version = info.Version
@@ -826,6 +782,91 @@ func (s *Service) RestoreTenant(ctx context.Context, id int64, ac AuditContext) 
 	}
 	s.Audit(ac, "tenant.restore", t, nil, nil)
 	return t, newPassword, nil
+}
+
+// restoreAccount recreates the Linux account and moves the home directory
+// back out of the trash. A failed move removes the just-created account so the
+// next attempt starts from a clean slate.
+func (s *Service) restoreAccount(ctx context.Context, t *domain.Tenant, uid int) error {
+	if err := s.Sys.CreateUser(ctx, t.Username, uid); err != nil {
+		return fmt.Errorf("重建 Linux 用户失败：%w", err)
+	}
+	trashHome := filepath.Join(t.TrashPath, "home")
+	if err := movePath(trashHome, t.HomeDir); err != nil {
+		_ = s.Sys.DeleteUser(ctx, t.Username)
+		return fmt.Errorf("移回家目录失败：%w", err)
+	}
+	if actualUID, gid, err := s.Sys.LookupIDs(ctx, t.Username); err == nil {
+		t.UID, t.GID = actualUID, gid
+	}
+	_ = s.Sys.Chown(ctx, t.HomeDir, t.UID, t.GID)
+	return nil
+}
+
+// startRestoredTenant writes the config and unit, then starts the instance and
+// waits for it to answer its health check. The password is only regenerated
+// when the config file was lost with the trash.
+func (s *Service) startRestoredTenant(ctx context.Context, t *domain.Tenant, ac AuditContext) (*domain.HealthInfo, string, error) {
+	newPassword, pwdErr := s.passwordIfConfigMissing(t)
+	if pwdErr != nil {
+		return nil, "", pwdErr
+	}
+	if err := s.writeTenantConfig(t, newPassword); err != nil {
+		return nil, newPassword, err
+	}
+	if err := s.writeUnit(ctx, t); err != nil {
+		return nil, newPassword, err
+	}
+	if err := s.reloadUnits(ctx); err != nil {
+		return nil, newPassword, err
+	}
+	if err := s.Sys.Enable(ctx, t.UnitName); err != nil {
+		return nil, newPassword, err
+	}
+	if err := s.Sys.Start(ctx, t.UnitName); err != nil {
+		_ = s.failTenant(t, "tenant.restore", "恢复后启动失败", err, ac)
+		return nil, newPassword, err
+	}
+	info, err := s.waitHealthy(ctx, t.Port, "", 45*time.Second)
+	if err != nil {
+		_ = s.failTenant(t, "tenant.restore", "恢复后健康检查失败", err, ac)
+		return nil, newPassword, err
+	}
+	return info, newPassword, nil
+}
+
+// restoreUID picks the UID a trashed tenant should come back with. The value
+// recorded in the trash metadata wins, but it must not collide with an account
+// that was created while the tenant sat in the trash.
+func (s *Service) restoreUID(ctx context.Context, t *domain.Tenant, meta trashMeta) (int, error) {
+	uid := t.UID
+	if meta.UID > 0 {
+		uid = meta.UID
+	}
+	if uid == 0 {
+		return s.allocateUID(ctx)
+	}
+	used, _ := s.Sys.UsedUIDs(ctx)
+	if dbUIDs, err := s.Store.AllTenantUIDs(); err == nil {
+		for u := range dbUIDs {
+			if u != uid {
+				used[u] = true
+			}
+		}
+	}
+	if used[uid] {
+		return s.allocateUID(ctx)
+	}
+	return uid, nil
+}
+
+// passwordIfConfigMissing generates a password only when the tenant has no
+// config file (its old password hash was lost with the trash).
+func (s *Service) passwordIfConfigMissing(t *domain.Tenant) (string, error) {
+	if _, err := os.Stat(s.tenantConfigPath(t)); errors.Is(err, os.ErrNotExist) {
+		return GeneratePassword(12)
+	}
+	return "", nil
 }
 
 func (s *Service) PurgeTenant(ctx context.Context, id int64, ac AuditContext) error {
@@ -885,11 +926,11 @@ func (s *Service) BulkAction(ctx context.Context, action string, ids []int64, ac
 		}
 		itemIDs = append(itemIDs, itemID)
 	}
-	go s.runBulk(job.ID, action, ids, itemIDs, ac)
+	go s.runBulk(context.WithoutCancel(ctx), job.ID, action, ids, itemIDs, ac)
 	return job, nil
 }
 
-func (s *Service) runBulk(jobID int64, action string, ids, itemIDs []int64, ac AuditContext) {
+func (s *Service) runBulk(ctx context.Context, jobID int64, action string, ids, itemIDs []int64, ac AuditContext) {
 	_ = s.Store.MarkJobRunning(jobID)
 	done, failed := 0, 0
 	for i, id := range ids {
@@ -897,11 +938,11 @@ func (s *Service) runBulk(jobID int64, action string, ids, itemIDs []int64, ac A
 		var err error
 		switch action {
 		case "start":
-			_, err = s.StartTenant(context.Background(), id, ac)
+			_, err = s.StartTenant(ctx, id, ac)
 		case "stop":
-			_, err = s.StopTenant(context.Background(), id, ac)
+			_, err = s.StopTenant(ctx, id, ac)
 		case "restart":
-			_, err = s.RestartTenant(context.Background(), id, ac)
+			_, err = s.RestartTenant(ctx, id, ac)
 		}
 		done++
 		status := domain.JobSucceeded
@@ -914,7 +955,7 @@ func (s *Service) runBulk(jobID int64, action string, ids, itemIDs []int64, ac A
 		_ = s.Store.UpdateJobItem(itemIDs[i], status, errText)
 		_ = s.Store.UpdateJobProgress(jobID, done, failed)
 	}
-	result, _ := json.Marshal(map[string]any{"done": done, "failed": failed})
+	result, _ := json.Marshal(map[string]any{"done": done, statusFailed: failed})
 	final := domain.JobSucceeded
 	if failed == done {
 		final = domain.JobFailed
@@ -993,11 +1034,11 @@ func (s *Service) ImportRows(ctx context.Context, rows []ImportRow, ac AuditCont
 		}
 		itemIDs = append(itemIDs, itemID)
 	}
-	go s.runImport(job.ID, rows, itemIDs, ac)
+	go s.runImport(context.WithoutCancel(ctx), job.ID, rows, itemIDs, ac)
 	return job, nil
 }
 
-func (s *Service) runImport(jobID int64, rows []ImportRow, itemIDs []int64, ac AuditContext) {
+func (s *Service) runImport(ctx context.Context, jobID int64, rows []ImportRow, itemIDs []int64, ac AuditContext) {
 	_ = s.Store.MarkJobRunning(jobID)
 	var success bytes.Buffer
 	successCSV := csv.NewWriter(&success)
@@ -1009,7 +1050,7 @@ func (s *Service) runImport(jobID int64, rows []ImportRow, itemIDs []int64, ac A
 	done, failed := 0, 0
 	for i, row := range rows {
 		_ = s.Store.UpdateJobItem(itemIDs[i], domain.JobRunning, "")
-		t, password, err := s.CreateTenant(context.Background(), CreateTenantInput{
+		t, password, err := s.CreateTenant(ctx, CreateTenantInput{
 			Username: row.Username, DisplayName: row.DisplayName, Notes: row.Notes,
 		}, ac)
 		done++
@@ -1028,7 +1069,7 @@ func (s *Service) runImport(jobID int64, rows []ImportRow, itemIDs []int64, ac A
 	s.setArtifact(jobID, "success.csv", success.Bytes())
 	s.setArtifact(jobID, "failures.csv", failures.Bytes())
 
-	result, _ := json.Marshal(map[string]any{"done": done, "failed": failed})
+	result, _ := json.Marshal(map[string]any{"done": done, statusFailed: failed})
 	final := domain.JobSucceeded
 	if failed == done {
 		final = domain.JobFailed
@@ -1078,8 +1119,8 @@ func copyTree(src, dst string) error {
 	if !info.IsDir() {
 		return copyFile(src, dst, info.Mode())
 	}
-	if err := os.MkdirAll(dst, info.Mode().Perm()); err != nil {
-		return err
+	if mkdirErr := os.MkdirAll(dst, info.Mode().Perm()); mkdirErr != nil {
+		return mkdirErr
 	}
 	entries, err := os.ReadDir(src)
 	if err != nil {
@@ -1123,14 +1164,14 @@ func copyFile(src, dst string, mode os.FileMode) error {
 	if err != nil {
 		return err
 	}
-	defer in.Close()
+	defer func() { _ = in.Close() }()
 	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode.Perm())
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
-		return err
+	if _, copyErr := io.Copy(out, in); copyErr != nil {
+		_ = out.Close()
+		return copyErr
 	}
 	return out.Close()
 }

@@ -124,6 +124,18 @@ var (
 )
 
 func (c *Config) Normalize() error {
+	if err := c.normalizeEndpoint(); err != nil {
+		return err
+	}
+	if err := c.normalizeClawbench(); err != nil {
+		return err
+	}
+	c.normalizeRetention()
+	c.normalizeSystem()
+	return nil
+}
+
+func (c *Config) normalizeEndpoint() error {
 	if strings.TrimSpace(c.Listen) == "" {
 		return errors.New("listen must not be empty")
 	}
@@ -135,6 +147,10 @@ func (c *Config) Normalize() error {
 		return fmt.Errorf("data_dir: %w", err)
 	}
 	c.DataDir = abs
+	return nil
+}
+
+func (c *Config) normalizeClawbench() error {
 	if c.Clawbench.InstallDir == "" {
 		return errors.New("clawbench.install_dir must not be empty")
 	}
@@ -147,14 +163,8 @@ func (c *Config) Normalize() error {
 	if c.Clawbench.UIDStart < 1000 || c.Clawbench.UIDEnd > 60000 || c.Clawbench.UIDStart >= c.Clawbench.UIDEnd {
 		return fmt.Errorf("invalid uid range %d-%d", c.Clawbench.UIDStart, c.Clawbench.UIDEnd)
 	}
-	if !cpuQuotaRe.MatchString(c.Clawbench.DefaultCPUQuota) {
-		return fmt.Errorf("invalid default_cpu_quota %q (want e.g. 200%%)", c.Clawbench.DefaultCPUQuota)
-	}
-	if !memoryMaxRe.MatchString(c.Clawbench.DefaultMemoryMax) {
-		return fmt.Errorf("invalid default_memory_max %q (want e.g. 4G)", c.Clawbench.DefaultMemoryMax)
-	}
-	if c.Clawbench.DefaultTasksMax < 1 {
-		return errors.New("default_tasks_max must be positive")
+	if err := validateDefaultQuota(c.Clawbench.DefaultCPUQuota, c.Clawbench.DefaultMemoryMax, c.Clawbench.DefaultTasksMax); err != nil {
+		return err
 	}
 	if strings.TrimSpace(c.Clawbench.NpmPackage) == "" {
 		c.Clawbench.NpmPackage = "@xulongzhe/clawbench"
@@ -165,6 +175,24 @@ func (c *Config) Normalize() error {
 	if c.Backup.Hour < 0 || c.Backup.Hour > 23 {
 		return fmt.Errorf("backup.hour must be 0-23, got %d", c.Backup.Hour)
 	}
+	return nil
+}
+
+// validateDefaultQuota checks the resource limits applied to new tenants.
+func validateDefaultQuota(cpuQuota, memoryMax string, tasksMax int) error {
+	if !cpuQuotaRe.MatchString(cpuQuota) {
+		return fmt.Errorf("invalid default_cpu_quota %q (want e.g. 200%%)", cpuQuota)
+	}
+	if !memoryMaxRe.MatchString(memoryMax) {
+		return fmt.Errorf("invalid default_memory_max %q (want e.g. 4G)", memoryMax)
+	}
+	if tasksMax < 1 {
+		return errors.New("default_tasks_max must be positive")
+	}
+	return nil
+}
+
+func (c *Config) normalizeRetention() {
 	if c.Backup.RetentionDays < 1 {
 		c.Backup.RetentionDays = 7
 	}
@@ -174,6 +202,9 @@ func (c *Config) Normalize() error {
 	if c.Audit.RetentionDays < 1 {
 		c.Audit.RetentionDays = 180
 	}
+}
+
+func (c *Config) normalizeSystem() {
 	if c.System.HomeRoot == "" {
 		c.System.HomeRoot = "/home"
 	}
@@ -183,7 +214,6 @@ func (c *Config) Normalize() error {
 	if c.System.UserShell == "" {
 		c.System.UserShell = "/usr/sbin/nologin"
 	}
-	return nil
 }
 
 func (c Config) DBPath() string      { return filepath.Join(c.DataDir, "fleet.db") }
@@ -223,7 +253,7 @@ func (c Config) EnsureDirs() error {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return fmt.Errorf("create %s: %w", dir, err)
 		}
-		_ = os.Chmod(dir, 0o700)
+		_ = os.Chmod(dir, 0o700) //nolint:gosec // 0700 is the correct mode for a data directory
 	}
 	public := []string{c.Clawbench.InstallDir, c.VersionsDir(), c.System.SystemdDir}
 	for _, dir := range public {

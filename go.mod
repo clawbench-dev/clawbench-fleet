@@ -1,5 +1,11 @@
 module clawbench-fleet
 
+// npm packages (web/node_modules/flatted) ship a Go example; it is not part
+// of this module and must not be compiled or linted.
+ignore (
+	./web/node_modules
+)
+
 go 1.26.0
 
 require (

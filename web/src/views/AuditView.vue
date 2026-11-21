@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { ChevronLeft, ChevronRight, RefreshCw, Search } from 'lucide-vue-next'
-import { api } from '../api'
+import { api, errorMessage } from '../api'
 import EmptyState from '../components/EmptyState.vue'
 import { toast } from '../stores/toast'
 import type { AuditEntry, Page } from '../types'
@@ -30,8 +30,8 @@ async function load() {
     const res = await api.get<Page<AuditEntry>>('/audit?' + params.toString())
     items.value = res.items
     total.value = res.total
-  } catch (e: any) {
-    toast(e?.message || '加载失败', 'error')
+  } catch (e) {
+    toast(errorMessage(e, '加载失败'), 'error')
   } finally {
     loading.value = false
   }

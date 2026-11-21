@@ -2,7 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { KeyRound, Save, Server, ShieldCheck } from 'lucide-vue-next'
-import { api } from '../api'
+import { api, errorMessage } from '../api'
 import { auth } from '../stores/auth'
 import { toast } from '../stores/toast'
 import type { Settings } from '../types'
@@ -40,8 +40,8 @@ async function load() {
       current_version: res.current_version,
       fleet_version: res.fleet_version,
     }
-  } catch (e: any) {
-    toast(e?.message || '加载失败', 'error')
+  } catch (e) {
+    toast(errorMessage(e, '加载失败'), 'error')
   }
 }
 
@@ -54,8 +54,8 @@ async function save() {
     const res = await api.patch<{ settings: Settings }>('/settings', settings.value)
     settings.value = res.settings
     toast('设置已保存', 'success')
-  } catch (e: any) {
-    toast(e?.message || '保存失败', 'error')
+  } catch (e) {
+    toast(errorMessage(e, '保存失败'), 'error')
   } finally {
     saving.value = false
   }
@@ -75,8 +75,8 @@ async function changePassword() {
     toast('密码已修改，请重新登录', 'success')
     auth.admin = null
     router.push('/login')
-  } catch (e: any) {
-    toast(e?.message || '修改失败', 'error')
+  } catch (e) {
+    toast(errorMessage(e, '修改失败'), 'error')
   } finally {
     pwdSaving.value = false
   }

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { AlertTriangle, ArrowUpCircle, Download, Play, RotateCcw, UploadCloud } from 'lucide-vue-next'
-import { api } from '../api'
+import { api, errorMessage } from '../api'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import { toast } from '../stores/toast'
 import type { Job, NpmVersion, Tenant, Version } from '../types'
@@ -42,8 +42,8 @@ async function load() {
     if (!pilotTenant.value && running.value.length) {
       pilotTenant.value = running.value[0].id
     }
-  } catch (e: any) {
-    toast(e?.message || '加载失败', 'error')
+  } catch (e) {
+    toast(errorMessage(e, '加载失败'), 'error')
   } finally {
     loading.value = false
   }
@@ -69,8 +69,8 @@ async function loadNpm() {
       const firstNew = npmVersions.value.find((v) => !v.installed)
       npmChoice.value = (firstNew || npmVersions.value[0])?.version || ''
     }
-  } catch (e: any) {
-    npmWarning.value = e?.message || '读取 npm 版本列表失败'
+  } catch (e) {
+    npmWarning.value = errorMessage(e, '读取 npm 版本列表失败')
     npmVersions.value = []
   } finally {
     npmLoading.value = false
@@ -85,8 +85,8 @@ async function installNpm() {
     await api.post<{ version: Version }>(`/upgrades/npm/${encodeURIComponent(version)}/install`)
     toast(`已从 npm 安装 ${version}`, 'success')
     await load()
-  } catch (e: any) {
-    toast(e?.message || '安装失败', 'error')
+  } catch (e) {
+    toast(errorMessage(e, '安装失败'), 'error')
   } finally {
     installing.value = false
   }
@@ -108,8 +108,8 @@ async function upload() {
     toast('版本上传成功', 'success')
     file.value = null
     load()
-  } catch (e: any) {
-    toast(e?.message || '上传失败', 'error')
+  } catch (e) {
+    toast(errorMessage(e, '上传失败'), 'error')
   } finally {
     uploading.value = false
   }
@@ -124,8 +124,8 @@ async function pilot(version: Version) {
     await api.post(`/upgrades/${encodeURIComponent(version.version)}/pilot`, { tenant_id: pilotTenant.value })
     toast(`试点成功：${version.version}`, 'success')
     load()
-  } catch (e: any) {
-    toast(e?.message || '试点失败，已自动回滚', 'error')
+  } catch (e) {
+    toast(errorMessage(e, '试点失败，已自动回滚'), 'error')
     load()
   }
 }
@@ -139,8 +139,8 @@ async function doApply() {
     activeJob.value = res.job
     toast('批量升级已开始', 'success')
     pollJob(res.job.id)
-  } catch (e: any) {
-    toast(e?.message || '批量升级失败', 'error')
+  } catch (e) {
+    toast(errorMessage(e, '批量升级失败'), 'error')
   }
 }
 
@@ -151,8 +151,8 @@ async function doRollback() {
     activeJob.value = res.job
     toast('回滚已开始', 'success')
     pollJob(res.job.id)
-  } catch (e: any) {
-    toast(e?.message || '回滚失败', 'error')
+  } catch (e) {
+    toast(errorMessage(e, '回滚失败'), 'error')
   }
 }
 

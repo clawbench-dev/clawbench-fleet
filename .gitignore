@@ -2,7 +2,12 @@
 /.fleet-dev/
 /web/node_modules/
 /web/dist/
+/web/coverage/
 /internal/web/dist/*
 !/internal/web/dist/.gitkeep
+coverage.out
+coverage/
+coverage*.out
+.clawbench-ci/
 *.log
 .DS_Store

@@ -57,7 +57,7 @@ func (s *Server) handleListReports(w http.ResponseWriter, r *http.Request) {
 		writeServiceErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	writeJSON(w, http.StatusOK, map[string]any{fieldItems: items})
 }
 
 func (s *Server) handleResolveReport(w http.ResponseWriter, r *http.Request) {

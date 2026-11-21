@@ -36,14 +36,14 @@ func (s *Service) UploadVersion(ctx context.Context, filename string, r io.Reade
 		return nil, err
 	}
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
+	defer func() { _ = os.Remove(tmpName) }()
 	written, err := io.Copy(tmp, io.LimitReader(r, maxBytes+1))
 	if err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return nil, err
 	}
-	if err := tmp.Close(); err != nil {
-		return nil, err
+	if closeErr := tmp.Close(); closeErr != nil {
+		return nil, closeErr
 	}
 	if written > maxBytes {
 		return nil, fmt.Errorf("升级包超过 %d MB 上限", maxBytes/1024/1024)
@@ -51,26 +51,31 @@ func (s *Service) UploadVersion(ctx context.Context, filename string, r io.Reade
 	if written == 0 {
 		return nil, errors.New("升级包是空文件")
 	}
-	if err := os.Chmod(tmpName, 0o755); err != nil {
-		return nil, err
+	if chmodErr := os.Chmod(tmpName, 0o755); chmodErr != nil { //nolint:gosec // the uploaded binary must be executable
+		return nil, chmodErr
 	}
-
 	version, err := s.validateBinary(ctx, tmpName, filename)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := s.Store.GetVersion(version); err == nil {
+	if _, getErr := s.Store.GetVersion(version); getErr == nil {
 		return nil, fmt.Errorf("版本 %s 已经存在", version)
 	}
+	return s.installUploaded(tmpName, version, ac)
+}
+
+// installUploaded moves the validated upload into the versions directory,
+// records it and makes it current when it is the first version.
+func (s *Service) installUploaded(tmpName, version string, ac AuditContext) (*domain.Version, error) {
 	destDir := filepath.Join(s.Cfg.VersionsDir(), version)
-	if err := os.MkdirAll(destDir, 0o755); err != nil {
-		return nil, err
+	if mkdirErr := os.MkdirAll(destDir, 0o755); mkdirErr != nil {
+		return nil, mkdirErr
 	}
 	dest := filepath.Join(destDir, "clawbench")
-	if err := os.Rename(tmpName, dest); err != nil {
+	if renameErr := os.Rename(tmpName, dest); renameErr != nil {
 		// Rename across filesystems falls back to a copy.
-		if err := copyFile(tmpName, dest, 0o755); err != nil {
-			return nil, err
+		if copyErr := copyFile(tmpName, dest, 0o755); copyErr != nil {
+			return nil, copyErr
 		}
 	}
 	sum, err := hashFile(dest)
@@ -93,7 +98,7 @@ func (s *Service) UploadVersion(ctx context.Context, filename string, r io.Reade
 		}
 		v.Status = "current"
 	}
-	s.Audit(ac, "upgrade.upload", nil, map[string]any{"version": version, "sha256": sum}, nil)
+	s.Audit(ac, "upgrade.upload", nil, map[string]any{fieldVersion: version, "sha256": sum}, nil)
 	return v, nil
 }
 
@@ -136,7 +141,7 @@ func hashFile(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
 		return "", err
@@ -174,9 +179,9 @@ func (s *Service) setCurrentSymlink(version string) error {
 // Pilot restarts one tenant on a new version and rolls the symlink back if it
 // does not come up. Nothing else is touched.
 func (s *Service) Pilot(ctx context.Context, version string, tenantID int64, ac AuditContext) (*domain.Tenant, error) {
-	t, err := s.tenantByID(tenantID)
-	if err != nil {
-		return nil, err
+	t, getErr := s.tenantByID(tenantID)
+	if getErr != nil {
+		return nil, getErr
 	}
 	if t.Status != domain.StatusRunning {
 		return nil, errors.New("试点租户必须处于运行中状态")
@@ -217,7 +222,7 @@ func (s *Service) Pilot(ctx context.Context, version string, tenantID int64, ac 
 	t.LastHealthAt = time.Now().Format(time.RFC3339)
 	t.LastError = ""
 	_ = s.Store.UpdateTenant(t)
-	s.Audit(ac, "upgrade.pilot", t, map[string]any{"version": version, "previous": oldVersion}, nil)
+	s.Audit(ac, "upgrade.pilot", t, map[string]any{fieldVersion: version, "previous": oldVersion}, nil)
 	return t, nil
 }
 
@@ -228,7 +233,7 @@ func (s *Service) rollbackPilot(ctx context.Context, t *domain.Tenant, oldVersio
 	_ = s.SetCurrentVersion(oldVersion)
 	_ = s.Sys.Restart(ctx, t.UnitName)
 	_, _ = s.waitHealthy(ctx, t.Port, oldVersion, 45*time.Second)
-	s.Audit(ac, "upgrade.pilot_rollback", t, map[string]any{"version": oldVersion}, nil)
+	s.Audit(ac, "upgrade.pilot_rollback", t, map[string]any{fieldVersion: oldVersion}, nil)
 }
 
 func (s *Service) ApplyUpgrade(ctx context.Context, version string, ac AuditContext) (*domain.Job, error) {
@@ -264,7 +269,7 @@ func (s *Service) ApplyUpgrade(ctx context.Context, version string, ac AuditCont
 	if len(tenants) == 0 {
 		return nil, errors.New("没有正在运行的租户可以升级")
 	}
-	payload, _ := json.Marshal(map[string]any{"version": version, "previous": oldVersion})
+	payload, _ := json.Marshal(map[string]any{fieldVersion: version, "previous": oldVersion})
 	job, err := s.Store.CreateJob("upgrade", string(payload), len(tenants))
 	if err != nil {
 		return nil, err
@@ -294,7 +299,7 @@ func (s *Service) runUpgrade(jobID int64, version, oldVersion string, tenants []
 
 	work := make(chan int)
 	var wg sync.WaitGroup
-	for w := 0; w < 4; w++ {
+	for range 4 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

@@ -10,7 +10,7 @@ import {
   Server,
   Users,
 } from 'lucide-vue-next'
-import { api } from '../api'
+import { api, errorMessage } from '../api'
 import MetricBar from '../components/MetricBar.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import { toast } from '../stores/toast'
@@ -25,8 +25,8 @@ async function load() {
   try {
     data.value = await api.get<Overview>('/overview')
     error.value = ''
-  } catch (e: any) {
-    error.value = e?.message || '加载失败'
+  } catch (e) {
+    error.value = errorMessage(e, '加载失败')
   }
 }
 
@@ -41,8 +41,8 @@ async function resolveReport(id: number) {
     await api.post(`/reports/${id}/resolve`)
     toast('已标记为处理完', 'success')
     load()
-  } catch (e: any) {
-    toast(e?.message || '操作失败', 'error')
+  } catch (e) {
+    toast(errorMessage(e, '操作失败'), 'error')
   }
 }
 

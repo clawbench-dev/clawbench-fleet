@@ -2,7 +2,7 @@
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { AlertTriangle, ArrowRight, CheckCircle2, Loader2, Plus } from 'lucide-vue-next'
-import { api } from '../api'
+import { api, errorMessage } from '../api'
 import CopyField from '../components/CopyField.vue'
 import Modal from '../components/Modal.vue'
 import { toast } from '../stores/toast'
@@ -37,8 +37,8 @@ async function submit() {
     const res = await api.post<{ tenant: Tenant; password: string; warning?: string; pending?: boolean }>('/tenants', body)
     created.value = res
     toast(res.pending ? '已受理，实例正在后台创建' : '租户创建成功', 'success')
-  } catch (e: any) {
-    error.value = e?.message || '创建失败'
+  } catch (e) {
+    error.value = errorMessage(e, '创建失败')
   } finally {
     submitting.value = false
   }

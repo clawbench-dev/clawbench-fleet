@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -48,6 +49,10 @@ type Service struct {
 	artifactAt  map[int64]time.Time
 
 	http *http.Client
+	// healthTimeout caps how long an operation waits for an instance to come
+	// up. Production uses the 45–60s defaults at each call site; tests lower
+	// it so failure paths do not sit in a real one-minute wait.
+	healthTimeout time.Duration
 
 	cpuMu   sync.Mutex
 	cpuPrev cpuSample
@@ -79,17 +84,18 @@ func New(cfg config.Config, st *store.Store, sys sysops.System) (*Service, error
 		return nil, err
 	}
 	s := &Service{
-		Cfg:          cfg,
-		Store:        st,
-		Sys:          sys,
-		settings:     stg,
-		sem:          make(chan struct{}, 4),
-		metrics:      map[int64]domain.Metrics{},
-		artifacts:    map[int64]map[string][]byte{},
-		artifactAt:   map[int64]time.Time{},
-		http:         &http.Client{Timeout: 3 * time.Second},
-		lastDaily:    map[string]string{},
-		provisioners: &provisionTracker{done: map[int64]chan struct{}{}},
+		Cfg:           cfg,
+		Store:         st,
+		Sys:           sys,
+		settings:      stg,
+		sem:           make(chan struct{}, 4),
+		metrics:       map[int64]domain.Metrics{},
+		artifacts:     map[int64]map[string][]byte{},
+		artifactAt:    map[int64]time.Time{},
+		http:          &http.Client{Timeout: 3 * time.Second},
+		healthTimeout: 60 * time.Second,
+		lastDaily:     map[string]string{},
+		provisioners:  &provisionTracker{done: map[int64]chan struct{}{}},
 	}
 	if err := st.SeedPorts(stg.PortStart, stg.PortEnd); err != nil {
 		return nil, err
@@ -149,6 +155,16 @@ func ValidateUsername(username string) error {
 }
 
 func validateSettings(s domain.Settings) error {
+	if err := validateRangeSettings(s); err != nil {
+		return err
+	}
+	if err := validateQuotaSettings(s); err != nil {
+		return err
+	}
+	return validateRetentionSettings(s)
+}
+
+func validateRangeSettings(s domain.Settings) error {
 	if s.PortStart < 1 || s.PortEnd > 65535 || s.PortStart >= s.PortEnd {
 		return fmt.Errorf("端口范围不合法：%d-%d", s.PortStart, s.PortEnd)
 	}
@@ -158,6 +174,13 @@ func validateSettings(s domain.Settings) error {
 	if s.UIDStart < 1000 || s.UIDEnd > 60000 || s.UIDStart >= s.UIDEnd {
 		return fmt.Errorf("UID 范围不合法：%d-%d", s.UIDStart, s.UIDEnd)
 	}
+	if s.DiskWarnGB < 0 {
+		return errors.New("磁盘提醒阈值不能是负数（0 表示关闭提醒）")
+	}
+	return nil
+}
+
+func validateQuotaSettings(s domain.Settings) error {
 	if !cpuQuotaRe.MatchString(s.DefaultCPUQuota) {
 		return fmt.Errorf("CPU 上限格式不对：%q（例如 200%%）", s.DefaultCPUQuota)
 	}
@@ -167,9 +190,10 @@ func validateSettings(s domain.Settings) error {
 	if s.DefaultTasksMax < 1 {
 		return errors.New("进程数上限必须大于 0")
 	}
-	if s.DiskWarnGB < 0 {
-		return errors.New("磁盘提醒阈值不能是负数（0 表示关闭提醒）")
-	}
+	return nil
+}
+
+func validateRetentionSettings(s domain.Settings) error {
 	if s.BackupHour < 0 || s.BackupHour > 23 {
 		return errors.New("备份时间必须是 0-23 点")
 	}
@@ -363,13 +387,13 @@ func (s *Service) writeTenantConfig(t *domain.Tenant, password string) error {
 		return err
 	}
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
+	defer func() { _ = os.Remove(tmpName) }()
 	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Close(); err != nil {
@@ -391,7 +415,7 @@ func (s *Service) tenantConfigPath(t *domain.Tenant) string {
 // --- health ---
 
 func (s *Service) healthCheck(ctx context.Context, port int) (*domain.HealthInfo, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/api/health", port), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/api/health", port), http.NoBody)
 	if err != nil {
 		return nil, err
 	}
@@ -399,7 +423,7 @@ func (s *Service) healthCheck(ctx context.Context, port int) (*domain.HealthInfo
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("health returned HTTP %d", resp.StatusCode)
 	}
@@ -414,6 +438,9 @@ func (s *Service) healthCheck(ctx context.Context, port int) (*domain.HealthInfo
 }
 
 func (s *Service) waitHealthy(ctx context.Context, port int, wantVersion string, timeout time.Duration) (*domain.HealthInfo, error) {
+	if s.healthTimeout > 0 && timeout > s.healthTimeout {
+		timeout = s.healthTimeout
+	}
 	deadline := time.Now().Add(timeout)
 	var lastErr error
 	for {
@@ -469,7 +496,7 @@ func (s *Service) Audit(ctx AuditContext, action string, t *domain.Tenant, detai
 		entry.TenantName = t.Username
 	}
 	if err != nil {
-		entry.Result = "failed"
+		entry.Result = statusFailed
 		entry.Error = err.Error()
 	}
 	_ = s.Store.AddAudit(entry)
@@ -499,6 +526,18 @@ func sanitizeDetail(in map[string]any) map[string]any {
 		}
 	}
 	return out
+}
+
+// blocksToBytes converts a filesystem block count to bytes without letting a
+// 32-bit/64-bit conversion silently overflow.
+func blocksToBytes(blocks uint64, blockSize int64) int64 {
+	if blockSize <= 0 {
+		return 0
+	}
+	if blocks > uint64(math.MaxInt64)/uint64(blockSize) {
+		return math.MaxInt64
+	}
+	return int64(blocks) * blockSize //nolint:gosec // overflow checked above
 }
 
 // --- host stats ---
@@ -540,8 +579,8 @@ func (s *Service) HostStats() HostStats {
 	}
 	var fs syscall.Statfs_t
 	if err := syscall.Statfs(s.Cfg.DataDir, &fs); err == nil {
-		st.DiskTotal = int64(fs.Blocks) * int64(fs.Bsize)
-		st.DiskFree = int64(fs.Bavail) * int64(fs.Bsize)
+		st.DiskTotal = blocksToBytes(fs.Blocks, fs.Bsize)
+		st.DiskFree = blocksToBytes(fs.Bavail, fs.Bsize)
 	}
 	return st
 }
@@ -594,18 +633,14 @@ func (s *Service) hostCPU() float64 {
 
 // --- helpers ---
 
+// ErrTenantNotFound is returned when the id does not name an existing tenant.
+// It wraps store.ErrNotFound so the HTTP layer can answer 404.
+var ErrTenantNotFound = fmt.Errorf("租户不存在: %w", store.ErrNotFound)
+
 func (s *Service) tenantByID(id int64) (*domain.Tenant, error) {
 	t, err := s.Store.GetTenant(id)
 	if errors.Is(err, store.ErrNotFound) {
-		return nil, fmt.Errorf("租户不存在")
-	}
-	return t, err
-}
-
-func (s *Service) tenantByUsername(username string) (*domain.Tenant, error) {
-	t, err := s.Store.GetTenantByUsername(username)
-	if errors.Is(err, store.ErrNotFound) {
-		return nil, fmt.Errorf("租户不存在")
+		return nil, ErrTenantNotFound
 	}
 	return t, err
 }
@@ -689,12 +724,4 @@ func (s *Service) writeUnit(ctx context.Context, t *domain.Tenant) error {
 
 func (s *Service) reloadUnits(ctx context.Context) error {
 	return s.Sys.DaemonReload(ctx)
-}
-
-func (s *Service) journalTail(ctx context.Context, unit string, lines int) string {
-	out, err := s.Sys.Journal(ctx, unit, lines)
-	if err != nil {
-		return ""
-	}
-	return out
 }

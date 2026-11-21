@@ -71,7 +71,7 @@ func (s *Store) ListJobItems(jobID int64) ([]domain.JobItem, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []domain.JobItem
 	for rows.Next() {
 		var it domain.JobItem
@@ -92,7 +92,7 @@ func (s *Store) RecentJobs(limit int) ([]domain.Job, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []domain.Job
 	for rows.Next() {
 		var j domain.Job

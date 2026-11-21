@@ -26,7 +26,7 @@ func (s *Store) ListVersions() ([]domain.Version, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []domain.Version
 	for rows.Next() {
 		var v domain.Version
@@ -87,17 +87,17 @@ func (s *Store) SetCurrentVersion(version string) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	var oldCurrent string
 	_ = tx.QueryRow(`SELECT version FROM versions WHERE status='current' LIMIT 1`).Scan(&oldCurrent)
 
-	if _, err := tx.Exec(`UPDATE versions SET status='installed' WHERE status IN ('current','previous')`); err != nil {
-		return err
+	if _, execErr := tx.Exec(`UPDATE versions SET status='installed' WHERE status IN ('current','previous')`); execErr != nil {
+		return execErr
 	}
 	if oldCurrent != "" && oldCurrent != version {
-		if _, err := tx.Exec(`UPDATE versions SET status='previous' WHERE version=?`, oldCurrent); err != nil {
-			return err
+		if _, execErr := tx.Exec(`UPDATE versions SET status='previous' WHERE version=?`, oldCurrent); execErr != nil {
+			return execErr
 		}
 	}
 	res, err := tx.Exec(`UPDATE versions SET status='current' WHERE version=?`, version)

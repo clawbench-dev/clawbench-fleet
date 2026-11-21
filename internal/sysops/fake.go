@@ -40,8 +40,9 @@ type fakeUnit struct {
 }
 
 var (
-	fakePortRe = regexp.MustCompile(`--port\s+(\d+)`)
-	fakeUserRe = regexp.MustCompile(`(?m)^User=(\S+)`)
+	fakePortRe   = regexp.MustCompile(`--port\s+(\d+)`)
+	fakeUserRe   = regexp.MustCompile(`(?m)^User=(\S+)`)
+	fakeClosedRe = regexp.MustCompile(`(?m)^#\s*clawbench-fake: closed\s*$`)
 )
 
 func NewFake(baseDir, installDir string) *Fake {
@@ -252,7 +253,7 @@ func (f *Fake) RemoveUnit(ctx context.Context, unit string) error {
 	u, ok := f.units[unit]
 	f.mu.Unlock()
 	if ok {
-		f.stopUnit(u, unit)
+		f.stopUnit(u)
 	}
 	f.mu.Lock()
 	delete(f.units, unit)
@@ -295,12 +296,20 @@ func (f *Fake) Start(ctx context.Context, unit string) error {
 	port := u.port
 	username := u.username
 	version := f.currentVersion()
+	// A unit that must not come up (server closed, health never passes) is
+	// marked with a comment line in its file, the way a broken unit would be
+	// marked by configuration.
+	closed := fakeClosedRe.MatchString(u.content)
 	f.mu.Unlock()
 
 	if port < 1 {
 		return fmt.Errorf("unit %s has no port", unit)
 	}
-	ln, err := net.Listen("tcp", ":"+strconv.Itoa(port))
+	if closed {
+		return nil
+	}
+	var lc net.ListenConfig
+	ln, err := lc.Listen(context.Background(), "tcp", ":"+strconv.Itoa(port))
 	if err != nil {
 		return fmt.Errorf("listen on %d: %w", port, err)
 	}
@@ -316,7 +325,7 @@ func (f *Fake) Start(ctx context.Context, unit string) error {
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprintf(w, `<!doctype html><html><head><meta charset="utf-8"><title>Clawbench dev</title>
+		_, _ = fmt.Fprintf(w, `<!doctype html><html><head><meta charset="utf-8"><title>Clawbench dev</title>
 <style>body{font-family:system-ui,sans-serif;background:#0f172a;color:#e2e8f0;display:grid;place-items:center;height:100vh;margin:0}
 .card{background:#1e293b;padding:40px 56px;border-radius:16px;border:1px solid #334155;text-align:center}
 code{color:#93c5fd}</style></head><body><div class="card">
@@ -342,11 +351,11 @@ func (f *Fake) Stop(ctx context.Context, unit string) error {
 	if !ok {
 		return nil
 	}
-	f.stopUnit(u, unit)
+	f.stopUnit(u)
 	return nil
 }
 
-func (f *Fake) stopUnit(u *fakeUnit, unit string) {
+func (f *Fake) stopUnit(u *fakeUnit) {
 	f.mu.Lock()
 	srv := u.server
 	u.server = nil
@@ -409,7 +418,7 @@ func (f *Fake) DiskUsage(ctx context.Context, path string) (int64, error) {
 	var total int64
 	err := filepath.WalkDir(path, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return nil
+			return nil //nolint:nilerr // skip unreadable entries; one permission error must not hide the total
 		}
 		if d.IsDir() {
 			return nil

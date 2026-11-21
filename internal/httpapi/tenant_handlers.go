@@ -24,7 +24,7 @@ func (s *Server) handleListTenants(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"items": items, "total": total, "page": page, "page_size": size,
+		fieldItems: items, "total": total, "page": page, "page_size": size,
 	})
 }
 
@@ -34,7 +34,7 @@ func (s *Server) handleScanTenants(w http.ResponseWriter, r *http.Request) {
 		writeServiceErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items, "mode": s.svc.Sys.Mode()})
+	writeJSON(w, http.StatusOK, map[string]any{fieldItems: items, "mode": s.svc.Sys.Mode()})
 }
 
 func (s *Server) handleAdoptTenants(w http.ResponseWriter, r *http.Request) {
@@ -68,9 +68,9 @@ func (s *Server) handleCreateTenant(w http.ResponseWriter, r *http.Request) {
 	// record and the password right away and can poll the list for the final
 	// status.
 	resp := map[string]any{
-		"tenant":   s.svc.TenantDTO(*t),
-		"password": password,
-		"pending":  t.Status == domain.StatusCreating,
+		fieldTenant:   s.svc.TenantDTO(*t),
+		fieldPassword: password,
+		"pending":     t.Status == domain.StatusCreating,
 	}
 	if err != nil {
 		resp["warning"] = err.Error()
@@ -90,7 +90,7 @@ func (s *Server) handleGetTenant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	backups, _ := s.svc.ListBackups(id)
-	writeJSON(w, http.StatusOK, map[string]any{"tenant": dto, "backups": backups})
+	writeJSON(w, http.StatusOK, map[string]any{fieldTenant: dto, "backups": backups})
 }
 
 func (s *Server) handleUpdateTenant(w http.ResponseWriter, r *http.Request) {
@@ -108,7 +108,7 @@ func (s *Server) handleUpdateTenant(w http.ResponseWriter, r *http.Request) {
 		writeServiceErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"tenant": s.svc.TenantDTO(*t)})
+	writeJSON(w, http.StatusOK, map[string]any{fieldTenant: s.svc.TenantDTO(*t)})
 }
 
 func (s *Server) handleDeleteTenant(w http.ResponseWriter, r *http.Request) {
@@ -128,7 +128,7 @@ func (s *Server) handleDeleteTenant(w http.ResponseWriter, r *http.Request) {
 		writeServiceErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"tenant": s.svc.TenantDTO(*t)})
+	writeJSON(w, http.StatusOK, map[string]any{fieldTenant: s.svc.TenantDTO(*t)})
 }
 
 func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
@@ -160,7 +160,7 @@ func (s *Server) tenantAction(w http.ResponseWriter, r *http.Request, fn func(in
 		writeServiceErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"tenant": s.svc.TenantDTO(*t)})
+	writeJSON(w, http.StatusOK, map[string]any{fieldTenant: s.svc.TenantDTO(*t)})
 }
 
 func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
@@ -176,11 +176,11 @@ func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"tenant": s.svc.TenantDTO(*t), "password": password, "warning": err.Error(),
+			fieldTenant: s.svc.TenantDTO(*t), fieldPassword: password, "warning": err.Error(),
 		})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"tenant": s.svc.TenantDTO(*t), "password": password})
+	writeJSON(w, http.StatusOK, map[string]any{fieldTenant: s.svc.TenantDTO(*t), fieldPassword: password})
 }
 
 func (s *Server) handleRepair(w http.ResponseWriter, r *http.Request) {
@@ -196,7 +196,7 @@ func (s *Server) handleRepair(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"tenant": s.svc.TenantDTO(*t), "password": password, "warning": err.Error(),
+			fieldTenant: s.svc.TenantDTO(*t), fieldPassword: password, "warning": err.Error(),
 		})
 		return
 	}
@@ -258,7 +258,7 @@ func (s *Server) handleBulk(w http.ResponseWriter, r *http.Request) {
 		writeServiceErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"job": job})
+	writeJSON(w, http.StatusAccepted, map[string]any{fieldJob: job})
 }
 
 func (s *Server) handleListBackups(w http.ResponseWriter, r *http.Request) {
@@ -305,7 +305,7 @@ func (s *Server) handleRestoreBackup(w http.ResponseWriter, r *http.Request) {
 		writeServiceErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"tenant": s.svc.TenantDTO(*t)})
+	writeJSON(w, http.StatusOK, map[string]any{fieldTenant: s.svc.TenantDTO(*t)})
 }
 
 func (s *Server) handleDeleteBackup(w http.ResponseWriter, r *http.Request) {
@@ -372,7 +372,7 @@ func (s *Server) handleRestoreTrash(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"tenant": s.svc.TenantDTO(*t), "password": password, "warning": err.Error(),
+			fieldTenant: s.svc.TenantDTO(*t), fieldPassword: password, "warning": err.Error(),
 		})
 		return
 	}

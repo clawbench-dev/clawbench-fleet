@@ -158,7 +158,7 @@ func TestAdoptRefusesPortOwnedByAnotherTenant(t *testing.T) {
 	if len(results) != 1 || results[0].Error == "" {
 		t.Fatalf("adoption should be refused: %+v", results)
 	}
-	if _, err := svc.Store.GetTenantByUsername("alice"); err == nil {
+	if _, svc := svc.Store.GetTenantByUsername("alice"); svc == nil {
 		t.Fatal("alice should not have been recorded")
 	}
 }
@@ -183,7 +183,7 @@ func TestRootIsProtected(t *testing.T) {
 	if !svc.TenantDTO(*tenant).Protected {
 		t.Fatal("root should be marked protected")
 	}
-	if _, err := svc.DeleteTenant(ctx, tenant.ID, "root", AuditContext{Actor: "tester"}); err == nil {
+	if _, svc := svc.DeleteTenant(ctx, tenant.ID, "root", AuditContext{Actor: "tester"}); svc == nil {
 		t.Fatal("deleting root must fail")
 	}
 	if _, err := svc.StopTenant(ctx, tenant.ID, AuditContext{Actor: "tester"}); err != nil {

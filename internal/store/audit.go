@@ -73,7 +73,7 @@ func (s *Store) ListAudit(f AuditFilter) ([]domain.AuditEntry, int, error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []domain.AuditEntry
 	for rows.Next() {
 		var e domain.AuditEntry
@@ -102,7 +102,7 @@ func (s *Store) RecentAudit(limit int) ([]domain.AuditEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []domain.AuditEntry
 	for rows.Next() {
 		var e domain.AuditEntry

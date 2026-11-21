@@ -1,0 +1,229 @@
+# golangci-lint v2 配置
+# 全量严格模式：所有代码必须通过所有 linters
+
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+  go: "1.26"
+
+linters:
+  default: none
+  enable:
+    # --- 默认集（Go 官方基线）---
+    - errcheck       # 未检查的错误返回值
+    - govet          # 可疑代码结构
+    - ineffassign    # 无效赋值
+    - staticcheck    # 综合静态分析（含 gosimple）
+    - unused         # 未使用的代码
+
+    # --- 正确性 ---
+    - bodyclose      # HTTP 响应体未关闭
+    - copyloopvar    # 循环变量捕获问题
+    - errorlint      # 错误包装（Go 1.13+）
+    - nilerr         # 错误检查后返回 nil
+    - nilnesserr     # nil 错误返回或缺少 nil 检查
+    - noctx          # HTTP 请求缺少 context
+    - rowserrcheck   # SQL rows.Err 未检查
+    - sqlclosecheck  # SQL rows/stmt 未关闭
+
+    # --- 安全 ---
+    - gosec          # 安全问题扫描
+
+    # --- 代码质量 ---
+    - gocritic       # 综合诊断（bug/性能/风格）
+    - goconst        # 重复字符串应提取为常量
+    - unconvert      # 不必要的类型转换
+    - unparam        # 未使用的函数参数
+    - revive         # golint 替代品
+
+    # --- 复杂度 ---
+    - gocyclo        # 圈复杂度
+    - gocognit       # 认知复杂度
+
+    # --- 风格 ---
+    - misspell       # 拼写错误
+    - nakedret       # 长函数中的裸返回
+    - intrange       # 使用 range over int（Go 1.22+）
+    - whitespace     # 多余的空白行
+
+    # --- 性能 ---
+    - prealloc       # 切片预分配提示
+
+    # --- 指令强制 ---
+    - nolintlint     # 要求 //nolint 指令附带原因
+
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: false
+
+    gocognit:
+      min-complexity: 30
+
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+      disabled-checks:
+        - hugeParam      # 大结构体参数提示，噪声较大
+        - rangeValCopy   # range 值拷贝提示，常见模式噪声
+        - unnamedResult  # 未命名返回值，历史代码大量存在
+        - paramTypeCombine # 参数类型合并，风格偏好
+        - commentedOutCode # 注释掉的代码，有时用于说明
+        - ifElseChain     # if-else链，风格偏好
+        - filepathJoin    # filepath.Join with separator，按设计
+        - importShadow    # import shadow，常见模式
+        - nestingReduce   # 嵌套减少，风格偏好
+        - regexpSimplify  # 正则简化，可能改变行为
+
+    goconst:
+      min-occurrences: 4
+      ignore-tests: true
+
+    gocyclo:
+      min-complexity: 15
+
+    gosec: {}
+
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment  # 过于严格，按需单独使用
+
+    misspell:
+      locale: US
+      ignore-rules:
+        - cancelled
+        - cancelling
+
+    nakedret:
+      max-func-lines: 30
+
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+
+    prealloc:
+      simple: true
+      range-loops: true
+      for-loops: false
+
+    revive:
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: increment-decrement
+        - name: indent-error-flow
+        - name: package-comments
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: var-declaration
+        - name: var-naming
+        # Disabled - would require adding boilerplate comments to many existing exports
+        # - name: exported
+        #   arguments:
+        #     - "checkPrivateReceivers"
+        # - name: unexported-return
+
+    unparam:
+      check-exported: false
+
+  exclusions:
+    paths:
+      - node_modules/
+      - web/node_modules/
+
+    rules:
+      # 测试里常见的写法：先声明 err（db, err := sql.Open），后面每个断言
+      # 再 `if err := ...`。不在函数作用域里共用一个 err，正是为了让每次
+      # 断言都能独立判断；production 代码仍然禁止遮蔽。
+      - path: _test\.go
+        linters:
+          - govet
+        text: "shadow"
+
+      # 测试文件同样走全量严格检查（errcheck / govet / bodyclose 等照常生效），
+      # 仅放行测试代码结构性无法避免的几类：
+      #   - gosec：测试会写临时文件、用固定测试密码；
+      #   - goconst：表格驱动测试里重复的字面量是刻意的；
+      #   - noctx：测试用的 net.Listen 拿不到真实请求上下文；
+      #   - gocyclo / gocognit：一个测试覆盖一条完整流程，拆开反而更难读。
+      - path: _test\.go
+        linters:
+          - gosec
+          - goconst
+          - noctx
+          - gocyclo
+          - gocognit
+
+      # internal/store: the database layer uses database/sql's non-context API
+      # on purpose (a single-connection admin console; callers pass context only
+      # for cancellation at the service layer).
+      - path: internal/store/
+        linters:
+          - noctx
+
+      # cmd/ 和 main.go 豁免 package-comments
+      - path: (cmd/|main\.go)
+        linters:
+          - revive
+        text: "package-comments"
+
+      # internal packages: package-comments not required for internal packages
+      - path: internal/
+        linters:
+          - revive
+        text: "package-comments"
+
+      # gosec: paths passed to os.ReadFile/os.Open are rooted in platform
+      # configuration (data dir, install dir, /proc) rather than request input.
+      - linters:
+          - gosec
+        text: "G304:"
+
+      # gosec: SQL text is assembled from constant fragments plus ?
+      # placeholders; every value is passed as a query argument.
+      - linters:
+          - gosec
+        text: "G202:"
+
+      # gosec: the system backend runs useradd/systemctl/ss by design.
+      - linters:
+          - gosec
+        text: "G204:"
+
+      # gosec: Secure is set when TLS terminates locally; the platform may also
+      # sit behind an HTTP reverse proxy, where Secure would break the cookie.
+      - linters:
+          - gosec
+        text: "G124:"
+
+      # gosec: directory permissions 0755 are standard for install directories
+      - linters:
+          - gosec
+        text: "G301:"
+
+      # gosec: file permissions 0644 are standard for unit files
+      - linters:
+          - gosec
+        text: "G306:"
+
+formatters:
+  enable:
+    - gofumpt        # 比 gofmt 更严格的格式化
+  settings:
+    gofumpt:
+      module-path: clawbench-fleet
+
+issues:
+  max-issues-per-linter: 50
+  max-same-issues: 10

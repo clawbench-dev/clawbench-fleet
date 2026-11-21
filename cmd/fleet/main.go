@@ -26,6 +26,12 @@ func main() {
 		fmt.Println(version.Version)
 		return
 	}
+	if err := run(); err != nil {
+		log.Fatalf("%v", err)
+	}
+}
+
+func run() error {
 	var (
 		configPath = flag.String("config", "/etc/clawbench-fleet/config.yaml", "platform config file")
 		devMode    = flag.Bool("dev", false, "run with an in-memory system backend (no root, no systemd)")
@@ -36,65 +42,20 @@ func main() {
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		log.Fatalf("config: %v", err)
+		return fmt.Errorf("config: %w", err)
 	}
 	if *dataDir != "" {
 		cfg.DataDir = *dataDir
 	}
 	if *devMode {
 		cfg.Dev = true
-		if cfg.DataDir == "" || cfg.DataDir == "/var/lib/clawbench-fleet" {
-			cfg.DataDir = ".fleet-dev"
-		}
-		abs, err := filepath.Abs(cfg.DataDir)
-		if err != nil {
-			log.Fatalf("data-dir: %v", err)
-		}
-		cfg.DataDir = abs
-		cfg.Listen = "127.0.0.1:30000"
-		cfg.System.HomeRoot = filepath.Join(cfg.DataDir, "dev", "homes")
-		cfg.System.SystemdDir = filepath.Join(cfg.DataDir, "dev", "units")
-		cfg.Clawbench.InstallDir = filepath.Join(cfg.DataDir, "dev", "opt")
-		cfg.Backup.Enabled = false
 	}
-	if *listen != "" {
-		cfg.Listen = *listen
-	}
-	if err := cfg.Normalize(); err != nil {
-		log.Fatalf("config: %v", err)
-	}
-	if err := cfg.EnsureDirs(); err != nil {
-		log.Fatalf("directories: %v", err)
-	}
-	if !cfg.Dev && os.Geteuid() != 0 {
-		log.Printf("warning: not running as root; useradd/systemctl will fail")
-	}
-
-	st, err := store.Open(cfg.DBPath())
+	b, err := bootstrap(cfg, *devMode, *listen)
 	if err != nil {
-		log.Fatalf("database: %v", err)
+		return err
 	}
-	defer st.Close()
-
-	var sys sysops.System
-	if cfg.Dev {
-		sys = sysops.NewFake(filepath.Join(cfg.DataDir, "dev"), cfg.Clawbench.InstallDir)
-	} else {
-		sys = sysops.NewReal(cfg.System.SystemdDir, cfg.System.UserShell, cfg.System.HomeRoot)
-	}
-	svc, err := fleet.New(cfg, st, sys)
-	if err != nil {
-		log.Fatalf("service: %v", err)
-	}
-
-	fixedAdminPassword := ""
-	if cfg.Dev {
-		fixedAdminPassword = "admin123"
-	}
-	initialPassword, created, err := fleet.BootstrapAdmin(cfg.InitialPasswordPath(), st, fixedAdminPassword)
-	if err != nil {
-		log.Fatalf("admin bootstrap: %v", err)
-	}
+	st, sys, svc := b.store, b.system, b.service
+	defer func() { _ = st.Close() }()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -111,16 +72,16 @@ func main() {
 
 	certFile, keyFile, tlsErr := findTLS(cfg.TLS.CertDir)
 	if tlsErr != nil {
-		log.Fatalf("tls: %v", tlsErr)
+		return fmt.Errorf("tls: %w", tlsErr)
 	}
 
 	fmt.Printf("Clawbench Fleet %s\n", version.Version)
 	fmt.Printf("  mode:   %s\n", sys.Mode())
 	fmt.Printf("  listen: %s\n", cfg.Listen)
 	fmt.Printf("  data:   %s\n", cfg.DataDir)
-	if created {
+	if b.created {
 		if cfg.Dev {
-			fmt.Printf("  admin:  admin / %s\n", initialPassword)
+			fmt.Printf("  admin:  admin / %s\n", b.initialPassword)
 		} else {
 			fmt.Printf("  admin:  admin（初始密码已写入 %s）\n", cfg.InitialPasswordPath())
 		}
@@ -142,11 +103,94 @@ func main() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)
-	case err := <-errCh:
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("http: %v", err)
+	case serveErr := <-errCh:
+		if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+			return fmt.Errorf("http: %w", serveErr)
 		}
 	}
+	return nil
+}
+
+// boot holds everything main needs from the bootstrap step.
+type boot struct {
+	store           *store.Store
+	system          sysops.System
+	service         *fleet.Service
+	initialPassword string
+	created         bool
+}
+
+// bootstrap finishes the configuration, opens the database and builds the
+// service. The caller owns the returned store and must close it.
+func bootstrap(cfg config.Config, devMode bool, listen string) (*boot, error) {
+	if devMode {
+		cfg.Dev = true
+	}
+	if err := applyOverrides(&cfg, devMode, listen); err != nil {
+		return nil, err
+	}
+	if normErr := cfg.Normalize(); normErr != nil {
+		return nil, fmt.Errorf("config: %w", normErr)
+	}
+	if dirErr := cfg.EnsureDirs(); dirErr != nil {
+		return nil, fmt.Errorf("directories: %w", dirErr)
+	}
+	if !cfg.Dev && os.Geteuid() != 0 {
+		log.Printf("warning: not running as root; useradd/systemctl will fail")
+	}
+	st, err := store.Open(cfg.DBPath())
+	if err != nil {
+		return nil, fmt.Errorf("database: %w", err)
+	}
+	sys := newSystem(cfg)
+	svc, err := fleet.New(cfg, st, sys)
+	if err != nil {
+		_ = st.Close()
+		return nil, fmt.Errorf("service: %w", err)
+	}
+	b := &boot{store: st, system: sys, service: svc}
+	fixedAdminPassword := ""
+	if cfg.Dev {
+		fixedAdminPassword = "admin123"
+	}
+	b.initialPassword, b.created, err = fleet.BootstrapAdmin(cfg.InitialPasswordPath(), st, fixedAdminPassword)
+	if err != nil {
+		_ = st.Close()
+		return nil, fmt.Errorf("admin bootstrap: %w", err)
+	}
+	return b, nil
+}
+
+// newSystem picks the simulated backend for --dev and the real one otherwise.
+func newSystem(cfg config.Config) sysops.System {
+	if cfg.Dev {
+		return sysops.NewFake(filepath.Join(cfg.DataDir, "dev"), cfg.Clawbench.InstallDir)
+	}
+	return sysops.NewReal(cfg.System.SystemdDir, cfg.System.UserShell, cfg.System.HomeRoot)
+}
+
+// applyOverrides puts the --dev sandbox and the --listen override on top of
+// the loaded configuration, then makes the data directory absolute.
+func applyOverrides(cfg *config.Config, devMode bool, listen string) error {
+	if devMode {
+		if cfg.DataDir == "" || cfg.DataDir == "/var/lib/clawbench-fleet" {
+			cfg.DataDir = ".fleet-dev"
+		}
+		abs, absErr := filepath.Abs(cfg.DataDir)
+		if absErr != nil {
+			return fmt.Errorf("data-dir: %w", absErr)
+		}
+		cfg.DataDir = abs
+		cfg.Listen = "127.0.0.1:30000"
+		cfg.System.HomeRoot = filepath.Join(cfg.DataDir, "dev", "homes")
+		cfg.System.SystemdDir = filepath.Join(cfg.DataDir, "dev", "units")
+		cfg.Clawbench.InstallDir = filepath.Join(cfg.DataDir, "dev", "opt")
+		cfg.Backup.Enabled = false
+	}
+	if listen != "" {
+		cfg.Listen = listen
+	}
+	return nil
 }
 
 func findTLS(dir string) (string, string, error) {

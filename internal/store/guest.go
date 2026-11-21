@@ -38,7 +38,7 @@ func (s *Store) ListGuestReports(openOnly bool, limit int) ([]domain.GuestReport
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	out := []domain.GuestReport{}
 	for rows.Next() {
 		var r domain.GuestReport

@@ -1,6 +1,7 @@
 package fleet
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"net"
@@ -25,8 +26,13 @@ func freePort(t *testing.T) int {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
-	return ln.Addr().(*net.TCPAddr).Port
+	tcpAddr, ok := ln.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatal("listener is not TCP")
+	}
+	port := tcpAddr.Port
+	_ = ln.Close()
+	return port
 }
 
 func newTestService(t *testing.T) (*Service, config.Config) {
@@ -114,7 +120,7 @@ func TestTenantLifecycle(t *testing.T) {
 	if err != nil || tenant.Status != domain.StatusStopped {
 		t.Fatalf("stop: %v %v", tenant, err)
 	}
-	if _, err := svc.healthCheck(ctx, tenant.Port); err == nil {
+	if _, cfg := svc.healthCheck(ctx, tenant.Port); cfg == nil {
 		t.Fatal("instance should be down after stop")
 	}
 
@@ -132,7 +138,7 @@ func TestTenantLifecycle(t *testing.T) {
 		t.Fatal("new password equals old password")
 	}
 	after, _ := os.ReadFile(cfg.TenantConfigPath("alice"))
-	if string(before) == string(after) {
+	if bytes.Equal(before, after) {
 		t.Fatal("config did not change after password reset")
 	}
 
@@ -148,7 +154,7 @@ func TestTenantLifecycle(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO kv(k,v) VALUES('x','before')`); err != nil {
 		t.Fatal(err)
 	}
-	db.Close()
+	_ = db.Close()
 
 	backup, err := svc.BackupTenant(ctx, tenant.ID, ac)
 	if err != nil {
@@ -162,7 +168,7 @@ func TestTenantLifecycle(t *testing.T) {
 	if _, err := db.Exec(`UPDATE kv SET v='after' WHERE k='x'`); err != nil {
 		t.Fatal(err)
 	}
-	db.Close()
+	_ = db.Close()
 
 	tenant, err = svc.RestoreBackup(ctx, tenant.ID, backup.ID, ac)
 	if err != nil {
@@ -173,7 +179,7 @@ func TestTenantLifecycle(t *testing.T) {
 	if err := db.QueryRow(`SELECT v FROM kv WHERE k='x'`).Scan(&value); err != nil {
 		t.Fatal(err)
 	}
-	db.Close()
+	_ = db.Close()
 	if value != "before" {
 		t.Fatalf("restored value = %q", value)
 	}
@@ -218,7 +224,7 @@ func TestTenantLifecycle(t *testing.T) {
 	if err := svc.PurgeTenant(ctx, tenant.ID, ac); err != nil {
 		t.Fatalf("purge: %v", err)
 	}
-	if _, err := svc.GetTenant(tenant.ID); err == nil {
+	if _, svc := svc.GetTenant(tenant.ID); svc == nil {
 		t.Fatal("tenant still exists after purge")
 	}
 
@@ -369,7 +375,7 @@ func TestNpmVersionsAndInstall(t *testing.T) {
 	}
 
 	// Installing the same version twice must not overwrite anything.
-	if _, err := svc.InstallFromNpm(ctx, "0.143.0", ac); err == nil {
+	if _, svc := svc.InstallFromNpm(ctx, "0.143.0", ac); svc == nil {
 		t.Fatal("expected an error when installing the same version twice")
 	}
 

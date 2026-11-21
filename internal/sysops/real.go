@@ -74,7 +74,7 @@ func (r *Real) CreateUser(ctx context.Context, username string, uid int) error {
 		return err
 	}
 	home := filepath.Join(r.homeRoot, username)
-	_ = os.Chmod(home, 0o700)
+	_ = os.Chmod(home, 0o700) //nolint:gosec // 0700 is the correct mode for a home directory
 	// A nologin shell already blocks login; locking the password is a second
 	// lock that also stops `su`. Failure here is not fatal.
 	_, _ = run(ctx, "passwd", "-l", username)
@@ -155,7 +155,21 @@ func (r *Real) StopPortOwner(ctx context.Context, port int, username string) err
 	for pid := range pids {
 		_ = syscall.Kill(pid, syscall.SIGTERM)
 	}
-	for i := 0; i < 50; i++ {
+	if err := waitPortClosed(ctx, port, 50); err == nil {
+		return nil
+	}
+	for pid := range pids {
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+	}
+	if err := waitPortClosed(context.Background(), port, 25); err == nil {
+		return nil
+	}
+	return fmt.Errorf("端口 %d 上的进程停不下来", port)
+}
+
+// waitPortClosed polls until nothing listens on port, at most attempts times.
+func waitPortClosed(ctx context.Context, port, attempts int) error {
+	for range attempts {
 		if !portOpen(port) {
 			return nil
 		}
@@ -165,16 +179,7 @@ func (r *Real) StopPortOwner(ctx context.Context, port int, username string) err
 		case <-time.After(200 * time.Millisecond):
 		}
 	}
-	for pid := range pids {
-		_ = syscall.Kill(pid, syscall.SIGKILL)
-	}
-	for i := 0; i < 25; i++ {
-		if !portOpen(port) {
-			return nil
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-	return fmt.Errorf("端口 %d 上的进程停不下来", port)
+	return fmt.Errorf("端口 %d 还在监听", port)
 }
 
 func processOwnedBy(pid, uid int) bool {
@@ -190,14 +195,14 @@ func processOwnedBy(pid, uid int) bool {
 		if len(fields) < 2 {
 			return false
 		}
-		real, err := strconv.Atoi(fields[1])
-		return err == nil && real == uid
+		realUID, err := strconv.Atoi(fields[1])
+		return err == nil && realUID == uid
 	}
 	return false
 }
 
 func portOpen(port int) bool {
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 300*time.Millisecond)
+	conn, err := (&net.Dialer{Timeout: 300 * time.Millisecond}).DialContext(context.Background(), "tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
 		return false
 	}
@@ -388,7 +393,7 @@ func (r *Real) IsActive(ctx context.Context, unit string) (bool, error) {
 	}
 	if err != nil {
 		// is-active exits non-zero for inactive units; that is a valid answer.
-		return false, nil
+		return false, nil //nolint:nilerr // non-zero exit is the "inactive" answer
 	}
 	return false, nil
 }

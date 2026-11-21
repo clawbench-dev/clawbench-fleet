@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { AlertTriangle, ExternalLink, Megaphone, RefreshCw, Search, Server, Wrench } from 'lucide-vue-next'
-import { api } from '../api'
+import { api, errorMessage } from '../api'
 import CopyField from '../components/CopyField.vue'
 import Modal from '../components/Modal.vue'
 import StatusBadge from '../components/StatusBadge.vue'
@@ -29,8 +29,8 @@ async function load(silent = false) {
   try {
     page.value = await api.get<GuestPage>('/public/instances')
     error.value = ''
-  } catch (e: any) {
-    if (!silent) error.value = e?.message || '加载失败'
+  } catch (e) {
+    if (!silent) error.value = errorMessage(e, '加载失败')
   } finally {
     if (!silent) loading.value = false
   }
@@ -73,8 +73,8 @@ async function submitReport() {
     })
     toast('已告诉管理员，稍后会有人处理', 'success')
     reportTarget.value = null
-  } catch (e: any) {
-    toast(e?.message || '提交失败，请稍后再试', 'error')
+  } catch (e) {
+    toast(errorMessage(e, '提交失败，请稍后再试'), 'error')
   } finally {
     submitting.value = false
   }

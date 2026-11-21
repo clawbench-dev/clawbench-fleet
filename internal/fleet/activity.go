@@ -90,7 +90,7 @@ func (s *Service) tenantLastActive(ctx context.Context, t domain.Tenant) (messag
 	if err != nil {
 		return messageTime{}, false
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	db.SetMaxOpenConns(1)
 
 	var newest messageTime

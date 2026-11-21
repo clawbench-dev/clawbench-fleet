@@ -122,13 +122,46 @@ docs/design.md        设计文档
 
 ---
 
-## 测试
+## 测试与门禁
+
+本地一条命令跑完 CI 的全部检查（lint、单元测试、集成测试、构建、前后端覆盖率门槛）：
 
 ```bash
-go test ./...        # 后端单元与集成测试（用模拟系统，不需要 root）
-cd web && npm test   # 前端单元测试
-cd web && npm run build   # 前端类型检查 + 构建
+./scripts/pre-push-checks.sh          # 全量
+./scripts/pre-push-checks.sh --skip-coverage   # 跳过覆盖率（快速自查）
 ```
+
+单项：
+
+```bash
+./scripts/lint-go.sh                 # golangci-lint（版本锁定在 .golangci-lint-version）
+go test ./...                        # 单元测试（模拟系统，不需要 root）
+go test -tags integration ./...      # 集成测试：真实 HTTP + SQLite + 模拟系统
+cd web && npm run lint               # ESLint
+cd web && npm test                   # 前端单元测试
+cd web && npm run build              # 前端类型检查 + 构建
+```
+
+门禁规则（与 Clawbench 主干一致）：
+
+| 检查 | 规则 |
+|---|---|
+| Go lint | `golangci.yaml` 全量严格模式；测试文件同样检查，只放行测试里无法避免的几类（gosec / goconst / noctx / 复杂度） |
+| Go 覆盖率 | 两层：① 项目门槛，改动行的包覆盖率不能低于主干基线 1.5 个百分点以上；② 改动行覆盖率 ≥ 80% |
+| 前端覆盖率 | 同上两层，统计 `src/api.ts`、`src/utils.ts`、`src/stores/` |
+| CI | `.github/workflows/ci.yml`：Lint / Test / Integration / Coverage Gate / Frontend |
+
+主干基线由 CI 在 main 分支构建后上传；本地从没跑过基线时只跑“改动行覆盖”这一层。
+
+
+
+装 Git 钩子（提交前只 lint 改动的文件，push 前跑全套）：
+
+```bash
+cd web && npm run hooks:install
+```
+
+> 本地覆盖率基线放在 `.clawbench-ci/baseline/`，已被 git 忽略，CI 会自动从 main 下载。
 
 ---
 

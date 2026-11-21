@@ -11,11 +11,14 @@ import (
 
 	"clawbench-fleet/internal/domain"
 
+	// Register the pure-Go SQLite driver used by every store query.
 	_ "modernc.org/sqlite"
 )
 
-var ErrNotFound = errors.New("not found")
-var ErrPortExhausted = errors.New("no consecutive free ports in range")
+var (
+	ErrNotFound      = errors.New("not found")
+	ErrPortExhausted = errors.New("no consecutive free ports in range")
+)
 
 type Store struct {
 	db *sql.DB
@@ -41,13 +44,13 @@ func Open(path string) (*Store, error) {
 		"PRAGMA synchronous=NORMAL",
 	} {
 		if _, err := db.Exec(pragma); err != nil {
-			db.Close()
+			_ = db.Close()
 			return nil, fmt.Errorf("%s: %w", pragma, err)
 		}
 	}
 	s := &Store{db: db}
 	if err := s.migrate(); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 	// The database holds the admin password hash and audit records; keep it
@@ -206,20 +209,19 @@ func (s *Store) addColumnIfMissing(table, column, decl string) error {
 	if err != nil {
 		return err
 	}
+	defer func() { _ = rows.Close() }()
 	found := false
 	for rows.Next() {
 		var name string
-		if err := rows.Scan(&name); err != nil {
-			rows.Close()
-			return err
+		if scanErr := rows.Scan(&name); scanErr != nil {
+			return scanErr
 		}
 		if name == column {
 			found = true
 		}
 	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return err
+	if rowsErr := rows.Err(); rowsErr != nil {
+		return rowsErr
 	}
 	if found {
 		return nil

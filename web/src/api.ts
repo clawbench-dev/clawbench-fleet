@@ -1,3 +1,12 @@
+// errorMessage 把任意 catch 到的值变成一句能展示给管理员的话。
+// 不用 `catch (e: any)`：严格的 lint 不允许 any，而这里只关心 message。
+export function errorMessage(e: unknown, fallback = '操作失败'): string {
+  if (e instanceof Error && e.message) return e.message
+  // 后端错误总是 ApiError/Error；抛出字符串的第三方代码也照样能显示。
+  if (typeof e === 'string' && e) return e
+  return fallback
+}
+
 export class ApiError extends Error {
   status: number
   code: string
@@ -34,7 +43,7 @@ async function request<T>(path: string, opts: Options = {}): Promise<T> {
     window.dispatchEvent(new CustomEvent('fleet:unauthorized'))
   }
   const text = await res.text()
-  let data: any = null
+  let data: unknown = null
   if (text) {
     try {
       data = JSON.parse(text)
@@ -43,7 +52,7 @@ async function request<T>(path: string, opts: Options = {}): Promise<T> {
     }
   }
   if (!res.ok) {
-    const err = data?.error
+    const err = (data as { error?: { code?: string; message?: string } } | null)?.error
     throw new ApiError(res.status, err?.code || 'http_error', err?.message || `请求失败（HTTP ${res.status}）`)
   }
   return data as T

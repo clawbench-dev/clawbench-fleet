@@ -12,7 +12,7 @@ import {
   Square,
   Upload,
 } from 'lucide-vue-next'
-import { api } from '../api'
+import { api, errorMessage } from '../api'
 import EmptyState from '../components/EmptyState.vue'
 import Modal from '../components/Modal.vue'
 import StatusBadge from '../components/StatusBadge.vue'
@@ -50,8 +50,8 @@ async function load(silent = false) {
     items.value = res.items
     total.value = res.total
     selected.value = selected.value.filter((id) => res.items.some((t) => t.id === id))
-  } catch (e: any) {
-    if (!silent) toast(e?.message || '加载失败', 'error')
+  } catch (e) {
+    if (!silent) toast(errorMessage(e, '加载失败'), 'error')
   } finally {
     if (!silent) loading.value = false
   }
@@ -97,8 +97,8 @@ async function act(t: Tenant, action: 'start' | 'stop' | 'restart') {
     await api.post(`/tenants/${t.id}/${action}`)
     toast(`${t.username} ${labels[action]}成功`, 'success')
     load(true)
-  } catch (e: any) {
-    toast(e?.message || `${labels[action]}失败`, 'error')
+  } catch (e) {
+    toast(errorMessage(e, `${labels[action]}失败`), 'error')
     load(true)
   }
 }
@@ -111,8 +111,8 @@ async function bulk(action: 'start' | 'stop' | 'restart') {
     selected.value = []
     watchJob(res.job.id)
     load(true)
-  } catch (e: any) {
-    toast(e?.message || '批量操作失败', 'error')
+  } catch (e) {
+    toast(errorMessage(e, '批量操作失败'), 'error')
   }
 }
 
@@ -147,8 +147,8 @@ async function openScan() {
     const res = await api.get<{ items: AdoptCandidate[] }>('/tenants/scan')
     candidates.value = res.items || []
     if (!candidates.value.length) scanError.value = '没有扫描到可以纳入的实例。'
-  } catch (e: any) {
-    scanError.value = e?.message || '扫描失败'
+  } catch (e) {
+    scanError.value = errorMessage(e, '扫描失败')
   } finally {
     scanning.value = false
   }
@@ -198,8 +198,8 @@ async function adoptPicked() {
     }
     scanOpen.value = false
     load(true)
-  } catch (e: any) {
-    toast(e?.message || '纳入失败', 'error')
+  } catch (e) {
+    toast(errorMessage(e, '纳入失败'), 'error')
   } finally {
     adopting.value = false
   }

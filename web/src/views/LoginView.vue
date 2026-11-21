@@ -2,7 +2,7 @@
 import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { Server } from 'lucide-vue-next'
-import { api } from '../api'
+import { api, errorMessage } from '../api'
 import { login } from '../stores/auth'
 
 const router = useRouter()
@@ -27,8 +27,8 @@ async function submit() {
   try {
     await login(username.value.trim(), password.value)
     router.push('/')
-  } catch (e: any) {
-    error.value = e?.message || '登录失败'
+  } catch (e) {
+    error.value = errorMessage(e, '登录失败')
   } finally {
     loading.value = false
   }

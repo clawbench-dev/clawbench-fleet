@@ -17,12 +17,12 @@ func (s *Store) SeedPorts(start, end int) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	stmt, err := tx.Prepare(`INSERT OR IGNORE INTO ports(port, tenant_id, state, updated_at) VALUES(?, NULL, 'free', ?)`)
 	if err != nil {
 		return err
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 	ts := now()
 	for p := start; p <= end; p++ {
 		if _, err := stmt.Exec(p, ts); err != nil {
@@ -42,22 +42,21 @@ func (s *Store) AllocatePorts(start, end, count int, tenantID int64) ([]int, err
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	rows, err := tx.Query(`SELECT port FROM ports WHERE state='free' AND port BETWEEN ? AND ? ORDER BY port`, start, end)
 	if err != nil {
 		return nil, err
 	}
+	defer func() { _ = rows.Close() }()
 	var free []int
 	for rows.Next() {
 		var p int
 		if err := rows.Scan(&p); err != nil {
-			rows.Close()
 			return nil, err
 		}
 		free = append(free, p)
 	}
-	rows.Close()
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
@@ -129,7 +128,7 @@ func (s *Store) AssignPorts(tenantID int64, ports []int) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	for _, p := range ports {
 		if _, err := tx.Exec(`UPDATE ports SET tenant_id=? WHERE port=? AND state='allocated'`, tenantID, p); err != nil {
 			return err
@@ -143,7 +142,7 @@ func (s *Store) PortsForTenant(tenantID int64) ([]int, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []int
 	for rows.Next() {
 		var p int
@@ -166,7 +165,7 @@ func (s *Store) ClaimPort(port int, tenantID int64) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	var owner int64
 	err = tx.QueryRow(`SELECT COALESCE(tenant_id, 0) FROM ports WHERE port=?`, port).Scan(&owner)
@@ -206,7 +205,7 @@ func (s *Store) FreePortGroups(start, end, size int) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var free []int
 	for rows.Next() {
 		var p int

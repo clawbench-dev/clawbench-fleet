@@ -16,8 +16,10 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-const SessionCookie = "fleet_session"
-const sessionTTL = 7 * 24 * time.Hour
+const (
+	SessionCookie = "fleet_session"
+	sessionTTL    = 7 * 24 * time.Hour
+)
 
 // BootstrapAdmin creates the single admin account on a fresh install and
 // writes the generated password to a root-only file. It is idempotent.
@@ -74,8 +76,8 @@ func ValidateAdminPassword(password string) error {
 }
 
 func (s *Service) Login(username, password, ip, ua string) (*domain.Admin, string, error) {
-	admin, err := s.Store.GetAdminByUsername(username)
-	if err != nil {
+	admin, lookupErr := s.Store.GetAdminByUsername(username)
+	if lookupErr != nil {
 		return nil, "", errors.New("账号或密码不正确")
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(admin.PasswordHash), []byte(password)); err != nil {
@@ -128,9 +130,9 @@ func (s *Service) Logout(token string) {
 }
 
 func (s *Service) ChangeAdminPassword(adminID int64, current, next string) error {
-	admin, err := s.Store.GetAdminByID(adminID)
-	if err != nil {
-		return err
+	admin, lookupErr := s.Store.GetAdminByID(adminID)
+	if lookupErr != nil {
+		return lookupErr
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(admin.PasswordHash), []byte(current)); err != nil {
 		return errors.New("当前密码不正确")

@@ -37,15 +37,15 @@ func (s *Service) BackupTenant(ctx context.Context, id int64, ac AuditContext) (
 	}
 	b := &domain.Backup{
 		TenantID: t.ID, Username: t.Username, CreatedAt: time.Now().Format(time.RFC3339),
-		Path: dir, Status: "ok",
+		Path: dir, Status: statusOK,
 	}
-	recordFailure := func(cause error) (*domain.Backup, error) {
-		b.Status = "failed"
+	recordFailure := func(cause error) error {
+		b.Status = statusFailed
 		b.Error = cause.Error()
 		_ = s.Store.CreateBackup(b)
 		_ = os.RemoveAll(dir)
 		s.Audit(ac, "backup.create", t, nil, cause)
-		return nil, cause
+		return cause
 	}
 
 	dbSrc := filepath.Join(t.DataDir, "ClawBench.db")
@@ -54,22 +54,22 @@ func (s *Service) BackupTenant(ctx context.Context, id int64, ac AuditContext) (
 		hasDB = true
 		snapshot := filepath.Join(dir, "ClawBench.db")
 		if err := s.snapshotDB(ctx, t, dbSrc, snapshot); err != nil {
-			return recordFailure(fmt.Errorf("数据库快照失败：%w", err))
+			return nil, recordFailure(fmt.Errorf("数据库快照失败：%w", err))
 		}
 		_ = os.Chmod(snapshot, 0o600)
 		if err := integrityCheck(snapshot); err != nil {
-			return recordFailure(fmt.Errorf("备份完整性检查失败：%w", err))
+			return nil, recordFailure(fmt.Errorf("备份完整性检查失败：%w", err))
 		}
 		b.IntegrityOK = true
 	}
 	configDir := filepath.Join(t.DataDir, "config")
 	if _, err := os.Stat(configDir); err == nil {
 		if err := copyTree(configDir, filepath.Join(dir, "config")); err != nil {
-			return recordFailure(fmt.Errorf("复制配置失败：%w", err))
+			return nil, recordFailure(fmt.Errorf("复制配置失败：%w", err))
 		}
 	}
 	if !hasDB && !dirHasConfig(dir) {
-		return recordFailure(errors.New("这个租户还没有可备份的数据"))
+		return nil, recordFailure(errors.New("这个租户还没有可备份的数据"))
 	}
 	size, _ := dirSize(dir)
 	b.SizeBytes = size
@@ -95,10 +95,10 @@ func (s *Service) snapshotDB(ctx context.Context, t *domain.Tenant, src, dst str
 	if err != nil {
 		return err
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	db.SetMaxOpenConns(1)
-	if _, err := db.ExecContext(ctx, "PRAGMA busy_timeout=5000"); err != nil {
-		return err
+	if _, execErr := db.ExecContext(ctx, "PRAGMA busy_timeout=5000"); execErr != nil {
+		return execErr
 	}
 	escaped := strings.ReplaceAll(dst, "'", "''")
 	_, err = db.ExecContext(ctx, "VACUUM INTO '"+escaped+"'")
@@ -110,9 +110,9 @@ func integrityCheck(path string) error {
 	if err != nil {
 		return err
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	var result string
-	if err := db.QueryRow("PRAGMA integrity_check").Scan(&result); err != nil {
+	if err := db.QueryRowContext(context.Background(), "PRAGMA integrity_check").Scan(&result); err != nil {
 		return err
 	}
 	if result != "ok" {
@@ -141,7 +141,7 @@ func (s *Service) BackupAll(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	ac := AuditContext{Actor: "system"}
+	ac := AuditContext{Actor: actorSystem}
 	for _, t := range tenants {
 		if t.Status == domain.StatusTrashed || t.Status == domain.StatusDeleting {
 			continue
@@ -179,12 +179,12 @@ func (s *Service) DeleteBackup(ctx context.Context, tenantID, backupID int64, ac
 }
 
 func (s *Service) RestoreBackup(ctx context.Context, tenantID, backupID int64, ac AuditContext) (*domain.Tenant, error) {
-	t, err := s.tenantByID(tenantID)
-	if err != nil {
-		return nil, err
+	t, getErr := s.tenantByID(tenantID)
+	if getErr != nil {
+		return nil, getErr
 	}
-	b, err := s.Store.GetBackup(backupID)
-	if err != nil || b.TenantID != tenantID {
+	b, backupErr := s.Store.GetBackup(backupID)
+	if backupErr != nil || b.TenantID != tenantID {
 		return nil, errors.New("备份不存在")
 	}
 	src := filepath.Join(b.Path, "ClawBench.db")
@@ -249,10 +249,10 @@ func (s *Service) WriteBackupTar(w io.Writer, backupID int64) error {
 		return errors.New("备份路径不合法")
 	}
 	gz := gzip.NewWriter(w)
-	defer gz.Close()
 	tw := tar.NewWriter(gz)
-	defer tw.Close()
-	return filepath.WalkDir(b.Path, func(path string, d os.DirEntry, err error) error {
+	// The backup tree is created and owned by this process; WalkDir does not
+	// follow symlinks, so there is no traversal race to defend against here.
+	walkErr := filepath.WalkDir(b.Path, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -272,13 +272,13 @@ func (s *Service) WriteBackupTar(w io.Writer, backupID int64) error {
 			return err
 		}
 		hdr.Name = filepath.ToSlash(rel)
-		if err := tw.WriteHeader(hdr); err != nil {
-			return err
+		if writeErr := tw.WriteHeader(hdr); writeErr != nil {
+			return writeErr
 		}
 		if d.IsDir() {
 			return nil
 		}
-		f, err := os.Open(path)
+		f, err := os.Open(path) //nolint:gosec // backup tree is platform-owned; WalkDir does not follow symlinks
 		if err != nil {
 			return err
 		}
@@ -289,13 +289,22 @@ func (s *Service) WriteBackupTar(w io.Writer, backupID int64) error {
 		}
 		return closeErr
 	})
+	closeTwErr := tw.Close()
+	closeGzErr := gz.Close()
+	if walkErr != nil {
+		return walkErr
+	}
+	if closeTwErr != nil {
+		return closeTwErr
+	}
+	return closeGzErr
 }
 
 func dirSize(path string) (int64, error) {
 	var total int64
 	err := filepath.WalkDir(path, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
-			return nil
+			return nil //nolint:nilerr // skip unreadable entries; one permission error must not hide the total
 		}
 		if d.IsDir() {
 			return nil
@@ -329,7 +338,7 @@ func (s *Service) PurgeExpiredTrash(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	ac := AuditContext{Actor: "system"}
+	ac := AuditContext{Actor: actorSystem}
 	for _, t := range items {
 		deleted, err := time.Parse(time.RFC3339, t.DeletedAt)
 		if err != nil || deleted.After(cutoff) {

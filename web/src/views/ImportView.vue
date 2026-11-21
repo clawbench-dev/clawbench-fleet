@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref } from 'vue'
 import { AlertTriangle, CheckCircle2, Download, FileSpreadsheet, UploadCloud } from 'lucide-vue-next'
-import { api, downloadFile } from '../api'
+import { api, downloadFile, errorMessage } from '../api'
 import { toast } from '../stores/toast'
 import type { ImportRow, Job } from '../types'
 
@@ -56,8 +56,8 @@ async function doPreview() {
     total.value = res.total
     importable.value = res.importable
     invalid.value = res.invalid
-  } catch (e: any) {
-    error.value = e?.message || '预览失败'
+  } catch (e) {
+    error.value = errorMessage(e, '预览失败')
   } finally {
     previewing.value = false
   }
@@ -72,8 +72,8 @@ async function startImport() {
     job.value = res.job
     toast('导入任务已开始', 'success')
     pollJob()
-  } catch (e: any) {
-    error.value = e?.message || '导入失败'
+  } catch (e) {
+    error.value = errorMessage(e, '导入失败')
   } finally {
     importing.value = false
   }
@@ -105,7 +105,7 @@ onBeforeUnmount(() => window.clearInterval(timer))
 function downloadResult(name: 'success.csv' | 'failures.csv') {
   if (!job.value) return
   downloadFile(`/jobs/${job.value.id}/artifacts/${name}`, name).catch((e) =>
-    toast(e?.message || '下载失败', 'error'),
+    toast(errorMessage(e, '下载失败'), 'error'),
   )
 }
 

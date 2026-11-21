@@ -23,7 +23,7 @@ func newInstanceDB(t *testing.T, dataDir string, historyTimes ...string) string 
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	stmts := []string{
 		`CREATE TABLE chat_history (id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER NOT NULL DEFAULT 0,
 			role TEXT NOT NULL, content TEXT NOT NULL, session_id TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)`,
@@ -115,7 +115,7 @@ func TestRefreshLastActiveFallsBackToOtherTables(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO chat_sessions(id, updated_at) VALUES('s1','2026-11-20 10:00:00')`); err != nil {
 		t.Fatal(err)
 	}
-	db.Close()
+	_ = db.Close()
 
 	svc.RefreshLastActive(ctx)
 
