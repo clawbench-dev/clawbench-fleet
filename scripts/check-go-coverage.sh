@@ -97,6 +97,8 @@ exempt_files = {
     "internal/version/version.go",    # build-time constant
     "internal/web/embed.go",          # go:embed wrapper
     "internal/sysops/real.go",        # useradd/systemctl/ss/proc: requires root and a real host
+    "internal/testutil/testutil.go",  # test-only fixture package, imported by _test.go files
+    "internal/testutil/helpers.go",   # test-only fixture package
 }
 
 # ── Colors ──────────────────────────────────────────────────────
