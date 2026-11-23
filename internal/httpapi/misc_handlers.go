@@ -47,6 +47,7 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	if current != nil {
 		currentVersion = current.Version
 	}
+	sshStatus, _ := s.svc.SSHStatus(r.Context())
 	writeJSON(w, http.StatusOK, map[string]any{
 		"settings":        s.svc.Settings(),
 		"mode":            s.svc.Sys.Mode(),
@@ -54,6 +55,7 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		"install_dir":     s.cfg.Clawbench.InstallDir,
 		"current_version": currentVersion,
 		"fleet_version":   version.Version,
+		"ssh_status":      sshStatus,
 	})
 }
 

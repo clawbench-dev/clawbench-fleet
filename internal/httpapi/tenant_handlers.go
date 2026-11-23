@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"time"
 
 	"clawbench-fleet/internal/domain"
 	"clawbench-fleet/internal/fleet"
@@ -76,7 +77,7 @@ func (s *Server) handleCreateTenant(w http.ResponseWriter, r *http.Request) {
 		"pending":     t.Status == domain.StatusCreating,
 	}
 	if err != nil {
-		resp["warning"] = err.Error()
+		resp[fieldWarning] = err.Error()
 	}
 	writeJSON(w, http.StatusCreated, resp)
 }
@@ -179,11 +180,53 @@ func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			fieldTenant: s.svc.TenantDTO(*t), fieldPassword: password, "warning": err.Error(),
+			fieldTenant: s.svc.TenantDTO(*t), fieldPassword: password, fieldWarning: err.Error(),
 		})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{fieldTenant: s.svc.TenantDTO(*t), fieldPassword: password})
+}
+
+func (s *Server) handleSSHStatus(w http.ResponseWriter, r *http.Request) {
+	st, err := s.svc.SSHStatus(r.Context())
+	if err != nil {
+		writeServiceErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": st,
+		"host":   s.svc.PublicHost(),
+	})
+}
+
+func (s *Server) handleTenantSSH(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_id", err.Error())
+		return
+	}
+	var body struct {
+		Enabled bool `json:"enabled"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	t, password, err := s.svc.SetTenantSSH(r.Context(), id, body.Enabled, auditCtx(r))
+	if err != nil {
+		if t == nil {
+			writeServiceErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			fieldTenant: s.svc.TenantDTO(*t), fieldPassword: password, fieldWarning: err.Error(),
+		})
+		return
+	}
+	resp := map[string]any{fieldTenant: s.svc.TenantDTO(*t)}
+	if password != "" {
+		resp[fieldPassword] = password
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleRepair(w http.ResponseWriter, r *http.Request) {
@@ -199,7 +242,7 @@ func (s *Server) handleRepair(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			fieldTenant: s.svc.TenantDTO(*t), fieldPassword: password, "warning": err.Error(),
+			fieldTenant: s.svc.TenantDTO(*t), fieldPassword: password, fieldWarning: err.Error(),
 		})
 		return
 	}
@@ -248,15 +291,37 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) handleBulk(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Action string  `json:"action"`
-		IDs    []int64 `json:"ids"`
+// handleMetricHistory returns the usage trend for one tenant. window is a Go
+// duration such as 24h or 168h; the service clamps it to one week.
+func (s *Server) handleMetricHistory(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_id", err.Error())
+		return
 	}
+	window := 24 * time.Hour
+	if raw := r.URL.Query().Get("window"); raw != "" {
+		parsed, parseErr := time.ParseDuration(raw)
+		if parseErr != nil {
+			writeErr(w, http.StatusBadRequest, "bad_window", "时间范围格式不对，例如 24h 或 168h")
+			return
+		}
+		window = parsed
+	}
+	samples, err := s.svc.MetricHistory(id, window)
+	if err != nil {
+		writeServiceErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{fieldItems: samples, "window": window.String()})
+}
+
+func (s *Server) handleBulk(w http.ResponseWriter, r *http.Request) {
+	var body fleet.BulkRequest
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	job, err := s.svc.BulkAction(r.Context(), body.Action, body.IDs, auditCtx(r))
+	job, err := s.svc.Bulk(r.Context(), body, auditCtx(r))
 	if err != nil {
 		writeServiceErr(w, err)
 		return
@@ -375,7 +440,7 @@ func (s *Server) handleRestoreTrash(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			fieldTenant: s.svc.TenantDTO(*t), fieldPassword: password, "warning": err.Error(),
+			fieldTenant: s.svc.TenantDTO(*t), fieldPassword: password, fieldWarning: err.Error(),
 		})
 		return
 	}

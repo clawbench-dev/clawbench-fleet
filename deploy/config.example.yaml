@@ -23,6 +23,8 @@ clawbench:
   default_tasks_max: 512
   # 单个租户家目录超过这个值就在总览页提醒（0 = 关闭提醒）
   disk_warn_gb: 5
+  # 新建租户的默认磁盘硬上限（GB，0 = 不限制）。超过上限的实例会被停掉并锁定 SSH。
+  disk_quota_gb: 0
   # 是否允许员工在实例里开端口转发（默认关，防止绕过管理直接对外暴露端口）
   allow_port_forward: false
   # 员工地址里显示的主机名；留空自动探测本机内网 IP
@@ -52,3 +54,11 @@ system:
   home_root: "/home"
   systemd_dir: "/etc/systemd/system"
   user_shell: "/usr/sbin/nologin"
+
+ssh:
+  # 新建租户默认是否开 SSH（每个租户还能在详情页单独关）
+  enabled: true
+  # 开 SSH 的租户使用的登录 shell
+  shell: "/bin/bash"
+  # 员工地址里展示的 SSH 端口；留 0 表示问 sshd，问不到就用 22
+  port: 0

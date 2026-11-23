@@ -44,6 +44,9 @@ type Service struct {
 
 	metricsMu sync.RWMutex
 	metrics   map[int64]domain.Metrics
+	// lastSample is the time the last history point was written. It is only
+	// touched by the metrics loop.
+	lastSample time.Time
 
 	artifactsMu sync.Mutex
 	artifacts   map[int64]map[string][]byte
@@ -122,23 +125,26 @@ func New(cfg config.Config, st *store.Store, sys sysops.System) (*Service, error
 
 func SettingsFromConfig(cfg config.Config) domain.Settings {
 	return domain.Settings{
-		PortStart:        cfg.Clawbench.PortStart,
-		PortEnd:          cfg.Clawbench.PortEnd,
-		PortsPerTenant:   cfg.Clawbench.PortsPerTenant,
-		UIDStart:         cfg.Clawbench.UIDStart,
-		UIDEnd:           cfg.Clawbench.UIDEnd,
-		DefaultCPUQuota:  cfg.Clawbench.DefaultCPUQuota,
-		DefaultMemoryMax: cfg.Clawbench.DefaultMemoryMax,
-		DefaultTasksMax:  cfg.Clawbench.DefaultTasksMax,
-		DiskWarnGB:       cfg.Clawbench.DiskWarnGB,
-		BackupEnabled:    cfg.Backup.Enabled,
-		BackupHour:       cfg.Backup.Hour,
-		BackupRetention:  cfg.Backup.RetentionDays,
-		TrashRetention:   cfg.Trash.RetentionDays,
-		AuditRetention:   cfg.Audit.RetentionDays,
-		AllowPortForward: cfg.Clawbench.AllowPortForward,
-		PublicHost:       cfg.Clawbench.PublicHost,
-		GuestEnabled:     true,
+		PortStart:          cfg.Clawbench.PortStart,
+		PortEnd:            cfg.Clawbench.PortEnd,
+		PortsPerTenant:     cfg.Clawbench.PortsPerTenant,
+		UIDStart:           cfg.Clawbench.UIDStart,
+		UIDEnd:             cfg.Clawbench.UIDEnd,
+		DefaultCPUQuota:    cfg.Clawbench.DefaultCPUQuota,
+		DefaultMemoryMax:   cfg.Clawbench.DefaultMemoryMax,
+		DefaultTasksMax:    cfg.Clawbench.DefaultTasksMax,
+		DiskWarnGB:         cfg.Clawbench.DiskWarnGB,
+		DefaultDiskQuotaGB: cfg.Clawbench.DiskQuotaGB,
+		MetricsRetention:   7,
+		BackupEnabled:      cfg.Backup.Enabled,
+		BackupHour:         cfg.Backup.Hour,
+		BackupRetention:    cfg.Backup.RetentionDays,
+		TrashRetention:     cfg.Trash.RetentionDays,
+		AuditRetention:     cfg.Audit.RetentionDays,
+		AllowPortForward:   cfg.Clawbench.AllowPortForward,
+		PublicHost:         cfg.Clawbench.PublicHost,
+		GuestEnabled:       true,
+		SSHEnabled:         cfg.SSH.Enabled,
 	}
 }
 
@@ -190,6 +196,12 @@ func validateRangeSettings(s domain.Settings) error {
 	}
 	if s.DiskWarnGB < 0 {
 		return errors.New("磁盘提醒阈值不能是负数（0 表示关闭提醒）")
+	}
+	if s.DefaultDiskQuotaGB < 0 {
+		return errors.New("默认磁盘上限不能是负数（0 表示不限制）")
+	}
+	if s.MetricsRetention < 1 || s.MetricsRetention > 90 {
+		return errors.New("用量历史保留天数必须在 1-90 之间")
 	}
 	return nil
 }

@@ -1,12 +1,12 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { AlertTriangle, ArrowRight, CheckCircle2, Loader2, Plus } from 'lucide-vue-next'
 import { api, errorMessage } from '../api'
 import CopyField from '../components/CopyField.vue'
 import Modal from '../components/Modal.vue'
 import { toast } from '../stores/toast'
-import type { Tenant } from '../types'
+import type { SSHStatus, Tenant } from '../types'
 
 const router = useRouter()
 
@@ -17,10 +17,28 @@ const form = ref({
   cpu_quota: '',
   memory_max: '',
   tasks_max: 0,
+  ssh_enabled: true,
+  disk_quota_gb: 0,
 })
 const submitting = ref(false)
 const error = ref('')
 const created = ref<{ tenant: Tenant; password: string; warning?: string; pending?: boolean } | null>(null)
+const ssh = ref<{ status: SSHStatus; host: string } | null>(null)
+
+const sshCommand = computed(() => {
+  if (!created.value?.tenant.ssh_enabled || !ssh.value) return ''
+  const port = ssh.value.status.port || 22
+  const portPart = port === 22 ? '' : ` -p ${port}`
+  return `ssh${portPart} ${created.value.tenant.username}@${ssh.value.host}`
+})
+
+onMounted(async () => {
+  try {
+    ssh.value = await api.get<{ status: SSHStatus; host: string }>('/ssh/status')
+  } catch {
+    // The status is only used for the SSH hint; creation still works without it.
+  }
+})
 
 async function submit() {
   error.value = ''
@@ -30,10 +48,12 @@ async function submit() {
       username: form.value.username.trim(),
       display_name: form.value.display_name.trim(),
       notes: form.value.notes.trim(),
+      ssh_enabled: form.value.ssh_enabled,
     }
     if (form.value.cpu_quota.trim()) body.cpu_quota = form.value.cpu_quota.trim()
     if (form.value.memory_max.trim()) body.memory_max = form.value.memory_max.trim()
     if (form.value.tasks_max > 0) body.tasks_max = form.value.tasks_max
+    body.disk_quota_gb = Math.max(0, Number(form.value.disk_quota_gb) || 0)
     const res = await api.post<{ tenant: Tenant; password: string; warning?: string; pending?: boolean }>('/tenants', body)
     created.value = res
     toast(res.pending ? '已受理，实例正在后台创建' : '租户创建成功', 'success')
@@ -50,7 +70,16 @@ function goDetail() {
 
 function createAnother() {
   created.value = null
-  form.value = { username: '', display_name: '', notes: '', cpu_quota: '', memory_max: '', tasks_max: 0 }
+  form.value = {
+    username: '',
+    display_name: '',
+    notes: '',
+    cpu_quota: '',
+    memory_max: '',
+    tasks_max: 0,
+    ssh_enabled: true,
+    disk_quota_gb: 0,
+  }
 }
 </script>
 
@@ -78,6 +107,15 @@ function createAnother() {
           <label>备注</label>
           <textarea v-model="form.notes" class="textarea" placeholder="部门、用途等，只有管理员能看到" />
         </div>
+        <div class="field span-2">
+          <label class="row small" style="gap: 8px">
+            <input v-model="form.ssh_enabled" class="checkbox" type="checkbox" />
+            允许员工通过 SSH 登录服务器
+          </label>
+          <div class="form-hint">
+            SSH 和网页登录用同一个密码，创建时显示一次。关掉后员工只能通过网页访问，之后也能在详情页单独打开。
+          </div>
+        </div>
       </div>
 
       <div class="divider" />
@@ -101,6 +139,11 @@ function createAnother() {
         <div class="field">
           <label>进程数上限</label>
           <input v-model.number="form.tasks_max" class="input mono" type="number" min="0" placeholder="512" />
+        </div>
+        <div class="field">
+          <label>磁盘上限（GB，0 = 不限制）</label>
+          <input v-model.number="form.disk_quota_gb" class="input mono" type="number" min="0" placeholder="0" />
+          <div class="form-hint">超过上限会自动停掉实例并锁定 SSH，清理或调大上限后再启动。</div>
         </div>
       </div>
 
@@ -137,6 +180,17 @@ function createAnother() {
       <div class="stack">
         <CopyField label="访问地址" :value="created.tenant.address" />
         <CopyField label="初始密码（只显示这一次）" :value="created.password" />
+        <CopyField v-if="sshCommand" label="SSH 登录命令" :value="sshCommand" />
+      </div>
+
+      <div
+        v-if="created.tenant.ssh_enabled && ssh?.status.problem"
+        class="card"
+        style="border-color: rgba(245,185,76,.4); padding: 12px; margin-top: 14px"
+      >
+        <div class="row small" style="color: var(--amber)">
+          <AlertTriangle :size="15" /> {{ ssh.status.problem }}。账号已经配好，但服务器这边需要先解决这个问题，员工才能 SSH 登录。
+        </div>
       </div>
 
       <div class="small muted-2" style="margin-top: 14px">
@@ -144,7 +198,7 @@ function createAnother() {
           账号已经建好，实例还在后台启动（一般十几秒到一分钟）。现在就可以把地址和密码发给员工，等列表里的状态变成“运行中”再让员工登录。
         </template>
         <template v-else>
-          员工打开地址后用这个密码登录。密码丢了只能重置。
+          员工打开地址后用这个密码登录。开启了 SSH 的话，同一个密码也能登录服务器。密码丢了只能重置。
         </template>
       </div>
 

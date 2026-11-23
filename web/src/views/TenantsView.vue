@@ -3,6 +3,9 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   ChevronLeft,
   ChevronRight,
+  Download,
+  Gauge,
+  KeyRound,
   Play,
   Plus,
   RefreshCw,
@@ -12,6 +15,7 @@ import {
   Square,
   Upload,
 } from 'lucide-vue-next'
+import { downloadFile } from '../api'
 import { api, errorMessage } from '../api'
 import EmptyState from '../components/EmptyState.vue'
 import Modal from '../components/Modal.vue'
@@ -69,6 +73,7 @@ onBeforeUnmount(() => {
   window.clearInterval(searchTimer)
   window.clearInterval(jobTimer)
   window.clearInterval(adoptTimer)
+  window.clearInterval(resetTimer)
 })
 
 watch([q, status], () => {
@@ -117,6 +122,90 @@ async function bulk(action: 'start' | 'stop' | 'restart') {
   } catch (e) {
     toast(errorMessage(e, '批量操作失败'), 'error')
   }
+}
+
+const quotaOpen = ref(false)
+const quotaBusy = ref(false)
+const quotaError = ref('')
+const quotaDraft = ref({ cpu_quota: '200%', memory_max: '4G', tasks_max: 512, disk_quota_gb: 0 })
+
+function openQuota() {
+  quotaError.value = ''
+  quotaOpen.value = true
+}
+
+async function submitQuota() {
+  quotaError.value = ''
+  quotaBusy.value = true
+  try {
+    const res = await api.post<{ job: Job }>('/tenants/bulk', {
+      action: 'quota',
+      ids: selected.value,
+      ...quotaDraft.value,
+    })
+    quotaOpen.value = false
+    toast(`已开始给 ${selected.value.length} 个实例改配额`, 'success')
+    selected.value = []
+    watchJob(res.job.id)
+    load(true)
+  } catch (e) {
+    quotaError.value = errorMessage(e, '改配额失败')
+  } finally {
+    quotaBusy.value = false
+  }
+}
+
+const resetOpen = ref(false)
+const resetBusy = ref(false)
+const resetError = ref('')
+const resetDone = ref<Job | null>(null)
+
+function openReset() {
+  resetError.value = ''
+  resetDone.value = null
+  resetOpen.value = true
+}
+
+async function submitReset() {
+  resetError.value = ''
+  resetBusy.value = true
+  try {
+    const res = await api.post<{ job: Job }>('/tenants/bulk', {
+      action: 'reset-password',
+      ids: selected.value,
+    })
+    toast(`已开始重置 ${selected.value.length} 个账号的密码`, 'success')
+    selected.value = []
+    resetDone.value = res.job
+    pollReset(res.job.id)
+  } catch (e) {
+    resetError.value = errorMessage(e, '重置密码失败')
+  } finally {
+    resetBusy.value = false
+  }
+}
+
+let resetTimer = 0
+function pollReset(id: number) {
+  window.clearInterval(resetTimer)
+  resetTimer = window.setInterval(async () => {
+    try {
+      const res = await api.get<{ job: Job }>(`/jobs/${id}`)
+      resetDone.value = res.job
+      if (['succeeded', 'failed', 'partial'].includes(res.job.status)) {
+        window.clearInterval(resetTimer)
+        load(true)
+      }
+    } catch {
+      window.clearInterval(resetTimer)
+    }
+  }, 1000)
+}
+
+function downloadPasswords(job: Job) {
+  downloadFile(`/jobs/${job.id}/artifacts/passwords.csv`, `新密码-${job.id}.csv`).catch((e) =>
+    toast(errorMessage(e, '下载失败'), 'error'),
+  )
 }
 
 function watchJob(id: number) {
@@ -316,10 +405,72 @@ function scanStatus(c: AdoptCandidate) {
           <button class="btn btn-sm" type="button" @click="bulk('start')"><Play :size="13" /> 启动</button>
           <button class="btn btn-sm" type="button" @click="bulk('stop')"><Square :size="13" /> 停止</button>
           <button class="btn btn-sm" type="button" @click="bulk('restart')"><RotateCw :size="13" /> 重启</button>
+          <button class="btn btn-sm" type="button" @click="openQuota"><Gauge :size="13" /> 改配额</button>
+          <button class="btn btn-sm" type="button" @click="openReset"><KeyRound :size="13" /> 重置密码</button>
         </div>
         <button class="btn btn-ghost btn-sm" type="button" @click="selected = []">取消选择</button>
       </div>
     </div>
+
+    <Modal v-if="quotaOpen" title="批量修改资源上限" @close="quotaOpen = false">
+      <p class="muted small" style="margin-top: 0">
+        将给选中的 {{ selected.length }} 个实例设置同一套上限。运行中的实例会重启一次，状态和结果可以在任务进度里看。
+      </p>
+      <div class="form-grid">
+        <div class="field"><label>CPU 上限</label><input v-model="quotaDraft.cpu_quota" class="input mono" placeholder="200%" /></div>
+        <div class="field"><label>内存上限</label><input v-model="quotaDraft.memory_max" class="input mono" placeholder="4G" /></div>
+        <div class="field"><label>进程数上限</label><input v-model.number="quotaDraft.tasks_max" class="input mono" type="number" min="1" /></div>
+        <div class="field">
+          <label>磁盘上限（GB，0 = 不限制）</label>
+          <input v-model.number="quotaDraft.disk_quota_gb" class="input mono" type="number" min="0" />
+        </div>
+      </div>
+      <div v-if="quotaError" class="small" style="color: var(--red); margin-top: 8px">{{ quotaError }}</div>
+      <template #footer>
+        <button class="btn" type="button" @click="quotaOpen = false">取消</button>
+        <button class="btn btn-primary" type="button" :disabled="quotaBusy" @click="submitQuota">
+          {{ quotaBusy ? '提交中…' : '开始修改' }}
+        </button>
+      </template>
+    </Modal>
+
+    <Modal v-if="resetOpen" title="批量重置密码" @close="resetOpen = false">
+      <p class="muted small" style="margin-top: 0">
+        将给选中的 {{ selected.length }} 个账号各生成一个新密码，旧密码立即失效。开启 SSH 的账号，网页和 SSH 都用新密码。
+      </p>
+      <p class="small muted-2">
+        密码只存在于这次任务的下载文件里，平台不会保存。任务结束后请立刻下载，关闭或过期后就找不回来了。
+      </p>
+      <div v-if="resetDone" class="card" style="padding: 12px; margin-top: 10px">
+        <div class="row-between">
+          <span class="small">
+            进度 {{ resetDone.done }} / {{ resetDone.total }}
+            <span v-if="resetDone.failed"> · 失败 {{ resetDone.failed }}</span>
+          </span>
+          <button
+            class="btn btn-sm btn-primary"
+            type="button"
+            :disabled="!['succeeded', 'partial'].includes(resetDone.status)"
+            @click="downloadPasswords(resetDone)"
+          >
+            <Download :size="13" /> 下载新密码
+          </button>
+        </div>
+      </div>
+      <div v-if="resetError" class="small" style="color: var(--red); margin-top: 8px">{{ resetError }}</div>
+      <template #footer>
+        <button class="btn" type="button" @click="resetOpen = false">{{ resetDone ? '完成' : '取消' }}</button>
+        <button
+          v-if="!resetDone"
+          class="btn btn-danger"
+          type="button"
+          :disabled="resetBusy"
+          @click="submitReset"
+        >
+          {{ resetBusy ? '提交中…' : '确认重置' }}
+        </button>
+      </template>
+    </Modal>
 
     <div v-if="items.length" class="table-wrap" style="margin-top: 12px">
       <table class="table">

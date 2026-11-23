@@ -6,7 +6,7 @@ import { api, errorMessage } from '../api'
 import Modal from '../components/Modal.vue'
 import { auth } from '../stores/auth'
 import { toast } from '../stores/toast'
-import type { Job, Settings } from '../types'
+import type { Job, Settings, SSHStatus } from '../types'
 
 const router = useRouter()
 const settings = ref<Settings | null>(null)
@@ -16,10 +16,15 @@ const meta = ref<{
   install_dir: string
   current_version: string
   fleet_version: string
+  ssh_status: SSHStatus
 } | null>(null)
 const saving = ref(false)
 const pwd = ref({ current_password: '', new_password: '', confirm: '' })
 const pwdSaving = ref(false)
+
+const sshReady = computed(
+  () => !!meta.value?.ssh_status.installed && !!meta.value?.ssh_status.running && !!meta.value?.ssh_status.password_auth,
+)
 
 const guestURL = computed(() => window.location.origin + '/guest')
 
@@ -32,6 +37,7 @@ async function load() {
       install_dir: string
       current_version: string
       fleet_version: string
+      ssh_status: SSHStatus
     }>('/settings')
     settings.value = res.settings
     meta.value = {
@@ -40,6 +46,7 @@ async function load() {
       install_dir: res.install_dir,
       current_version: res.current_version,
       fleet_version: res.fleet_version,
+      ssh_status: res.ssh_status,
     }
   } catch (e) {
     toast(errorMessage(e, '加载失败'), 'error')
@@ -241,6 +248,14 @@ async function changePassword() {
             <label>磁盘提醒阈值（GB，0=关闭）</label>
             <input v-model.number="settings.disk_warn_gb" class="input mono" type="number" min="0" />
           </div>
+          <div class="field">
+            <label>新租户默认磁盘上限（GB，0=不限制）</label>
+            <input v-model.number="settings.default_disk_quota_gb" class="input mono" type="number" min="0" />
+          </div>
+          <div class="field">
+            <label>用量历史保留天数</label>
+            <input v-model.number="settings.metrics_retention_days" class="input mono" type="number" min="1" max="90" />
+          </div>
         </div>
         <div class="small muted-2" style="margin-top: 10px">
           保存后只影响新租户；要让已有实例也用上，点右上角“应用到所有实例”。
@@ -279,6 +294,43 @@ async function changePassword() {
           <div class="field"><label>回收站保留天数</label><input v-model.number="settings.trash_retention_days" class="input mono" type="number" min="1" /></div>
           <div class="field"><label>审计保留天数</label><input v-model.number="settings.audit_retention_days" class="input mono" type="number" min="1" /></div>
         </div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top: 16px">
+      <div class="card-header">
+        <div>
+          <div class="card-title">SSH 登录</div>
+          <div class="card-sub">平台只准备租户账号，不会修改服务器的 sshd 配置</div>
+        </div>
+        <span class="badge" :class="sshReady ? 'badge-ok' : 'badge-failed'">
+          {{ sshReady ? '可用' : '需要处理' }}
+        </span>
+      </div>
+      <label class="row small">
+        <input v-model="settings.ssh_enabled" class="checkbox" type="checkbox" />
+        新建租户默认开启 SSH（每个租户还能单独关掉）
+      </label>
+      <div v-if="meta" class="detail-grid" style="margin-top: 12px">
+        <div class="detail-item">
+          <span class="detail-label">sshd</span>
+          <span class="detail-value">{{ meta.ssh_status.installed ? (meta.ssh_status.running ? '已安装，运行中' : '已安装，未运行') : '未安装' }}</span>
+        </div>
+        <div class="detail-item">
+          <span class="detail-label">端口</span>
+          <span class="detail-value mono">{{ meta.ssh_status.port || 22 }}</span>
+        </div>
+        <div class="detail-item">
+          <span class="detail-label">密码登录</span>
+          <span class="detail-value">{{ meta.ssh_status.password_auth ? '已允许' : '未允许' }}</span>
+        </div>
+      </div>
+      <div v-if="meta?.ssh_status.problem" class="row small" style="color: var(--amber); margin-top: 10px">
+        {{ meta.ssh_status.problem }}
+      </div>
+      <div class="small muted-2" style="margin-top: 10px">
+        员工用和网页登录相同的密码 SSH。要关闭密码登录的全局策略、或只允许密钥登录，请直接改服务器的
+        sshd 配置，平台不会覆盖它。
       </div>
     </div>
 

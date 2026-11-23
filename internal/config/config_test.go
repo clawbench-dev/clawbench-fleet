@@ -20,6 +20,24 @@ func TestDefaultNormalizes(t *testing.T) {
 	}
 }
 
+func TestSSHDefaultsAndNormalize(t *testing.T) {
+	cfg := Default()
+	if !cfg.SSH.Enabled {
+		t.Fatal("SSH should be on by default for new tenants")
+	}
+	if cfg.SSH.Shell != "/bin/bash" {
+		t.Fatalf("shell = %q", cfg.SSH.Shell)
+	}
+	cfg.SSH.Shell = "  "
+	cfg.SSH.Port = 70000
+	if err := cfg.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SSH.Shell != "/bin/bash" || cfg.SSH.Port != 0 {
+		t.Fatalf("normalized SSH = %+v", cfg.SSH)
+	}
+}
+
 func TestLoadMissingFileUsesDefaults(t *testing.T) {
 	cfg, err := Load(filepath.Join(t.TempDir(), "absent.yaml"))
 	if err != nil {

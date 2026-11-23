@@ -669,6 +669,9 @@ func (s *Service) insertAdoptedTenant(c AdoptCandidate) (*domain.Tenant, string)
 		DataDir:     c.DataDir,
 		UnitName:    s.Cfg.UnitName(c.Username),
 		Notes:       "从已有实例纳入",
+		// Adoption keeps the account's existing login setup. The operator can
+		// turn SSH on from the detail page, which will assign a new password.
+		SSHEnabled: false,
 	}
 	s.createMu.Lock()
 	defer s.createMu.Unlock()

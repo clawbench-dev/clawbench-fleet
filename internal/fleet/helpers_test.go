@@ -51,3 +51,5 @@ func TestHashPasswordMatchesClawbench(t *testing.T) {
 		t.Fatalf("hash = %s want %s", got, want)
 	}
 }
+
+func boolPtr(v bool) *bool { return &v }

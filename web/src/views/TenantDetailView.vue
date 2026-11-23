@@ -11,6 +11,7 @@ import {
   RotateCcw,
   RotateCw,
   ScrollText,
+  Activity,
   Square,
   Trash2,
   Wrench,
@@ -20,10 +21,12 @@ import ConfirmDialog from '../components/ConfirmDialog.vue'
 import CopyField from '../components/CopyField.vue'
 import EmptyState from '../components/EmptyState.vue'
 import Modal from '../components/Modal.vue'
+import LineChart from '../components/LineChart.vue'
 import StatusBadge from '../components/StatusBadge.vue'
+import type { Series } from '../components/LineChart.vue'
 import { toast } from '../stores/toast'
-import type { AuditEntry, Backup, Tenant } from '../types'
-import { actionLabel, formatAgo, formatBytes, formatTime } from '../utils'
+import type { AuditEntry, Backup, MetricSample, SSHStatus, Tenant } from '../types'
+import { actionLabel, formatAgo, formatBytes, formatPercent, formatTime } from '../utils'
 
 const route = useRoute()
 const router = useRouter()
@@ -34,7 +37,7 @@ const backups = ref<Backup[]>([])
 const audit = ref<AuditEntry[]>([])
 const loading = ref(true)
 const error = ref('')
-const tab = ref<'logs' | 'backups' | 'audit'>('logs')
+const tab = ref<'logs' | 'backups' | 'usage' | 'audit'>('logs')
 const logs = ref('')
 const logsLoading = ref(false)
 const busy = ref('')
@@ -46,8 +49,38 @@ const forceDeleteOpen = ref(false)
 const restoreTarget = ref<Backup | null>(null)
 const removeBackupTarget = ref<Backup | null>(null)
 const trashed = computed(() => tenant.value?.status === 'trashed')
+const ssh = ref<{ status: SSHStatus; host: string } | null>(null)
+const sshDisableOpen = ref(false)
+const sshCommand = computed(() => {
+  if (!tenant.value?.ssh_enabled || !ssh.value) return ''
+  const port = ssh.value.status.port || 22
+  const portPart = port === 22 ? '' : ` -p ${port}`
+  return `ssh${portPart} ${tenant.value.username}@${ssh.value.host}`
+})
 
-const quota = ref({ cpu_quota: '', memory_max: '', tasks_max: 0 })
+const quota = ref({ cpu_quota: '', memory_max: '', tasks_max: 0, disk_quota_gb: 0 })
+const usageWindow = ref<'24h' | '7d'>('24h')
+const usage = ref<MetricSample[]>([])
+const usageLoading = ref(false)
+const usageError = ref('')
+
+const cpuSeries = computed<Series[]>(() => [
+  { name: 'CPU %', color: 'var(--accent)', values: usage.value.map((s) => s.cpu_percent) },
+])
+const memorySeries = computed<Series[]>(() => [
+  { name: '内存', color: 'var(--purple)', values: usage.value.map((s) => s.memory_bytes) },
+])
+const diskSeries = computed<Series[]>(() => [
+  { name: '磁盘', color: 'var(--amber)', values: usage.value.map((s) => s.disk_bytes) },
+])
+const usageLabels = computed(() =>
+  usage.value.map((s) => {
+    const d = new Date(s.at)
+    return usageWindow.value === '24h'
+      ? d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+      : d.toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' })
+  }),
+)
 const portOpen = ref(false)
 const portDraft = ref(0)
 const portError = ref('')
@@ -67,6 +100,7 @@ async function load(silent = false) {
       cpu_quota: res.tenant.cpu_quota,
       memory_max: res.tenant.memory_max,
       tasks_max: res.tenant.tasks_max,
+      disk_quota_gb: res.tenant.disk_quota_gb,
     }
     error.value = ''
   } catch (e) {
@@ -78,13 +112,33 @@ async function load(silent = false) {
 
 onMounted(async () => {
   await load()
+  await loadSSH()
   timer = window.setInterval(() => load(true), 5000)
 })
 onBeforeUnmount(() => window.clearInterval(timer))
 
 watch(tab, (value) => {
   if (value === 'audit') loadAudit()
+  if (value === 'usage') loadUsage()
 })
+
+watch(usageWindow, () => {
+  if (tab.value === 'usage') loadUsage()
+})
+
+async function loadUsage() {
+  usageLoading.value = true
+  usageError.value = ''
+  try {
+    const window = usageWindow.value === '24h' ? '24h' : '168h'
+    const res = await api.get<{ items: MetricSample[] }>(`/tenants/${id.value}/metrics/history?window=${window}`)
+    usage.value = res.items || []
+  } catch (e) {
+    usageError.value = errorMessage(e, '加载用量失败')
+  } finally {
+    usageLoading.value = false
+  }
+}
 
 async function act(action: 'start' | 'stop' | 'restart') {
   const labels = { start: '启动', stop: '停止', restart: '重启' }
@@ -98,6 +152,40 @@ async function act(action: 'start' | 'stop' | 'restart') {
   } finally {
     busy.value = ''
     load(true)
+  }
+}
+
+async function loadSSH() {
+  try {
+    ssh.value = await api.get<{ status: SSHStatus; host: string }>('/ssh/status')
+  } catch {
+    ssh.value = null
+  }
+}
+
+async function setSSH(enabled: boolean) {
+  busy.value = 'ssh'
+  try {
+    const res = await api.post<{ tenant: Tenant; password?: string; warning?: string }>(
+      `/tenants/${id.value}/ssh`,
+      { enabled },
+    )
+    tenant.value = res.tenant
+    if (res.password) {
+      password.value = res.password
+      passwordTitle.value = 'SSH 已开启，网页和 SSH 的新密码（只显示这一次）'
+    } else {
+      toast('SSH 已关闭', 'success')
+    }
+    if (res.warning) toast(res.warning, 'error')
+    else if (res.password) toast('SSH 已开启', 'success')
+    await loadSSH()
+    load(true)
+  } catch (e) {
+    toast(errorMessage(e, enabled ? '开启 SSH 失败' : '关闭 SSH 失败'), 'error')
+  } finally {
+    busy.value = ''
+    sshDisableOpen.value = false
   }
 }
 
@@ -465,6 +553,33 @@ function download(backup: Backup) {
           <div class="detail-item"><span class="detail-label">最后健康检查</span><span class="detail-value">{{ formatTime(tenant.last_health_at) }}</span></div>
           <div class="detail-item"><span class="detail-label">最近活跃</span><span class="detail-value">{{ formatAgo(tenant.last_active_at) }}</span></div>
           <div class="detail-item"><span class="detail-label">磁盘占用</span><span class="detail-value">{{ formatBytes(tenant.disk_bytes) }}</span></div>
+          <div class="detail-item" style="grid-column: span 2">
+            <span class="detail-label">SSH 登录</span>
+            <span class="row" style="gap: 8px; flex-wrap: wrap">
+              <span class="badge" :class="tenant.ssh_enabled ? 'badge-ok' : ''">
+                {{ tenant.ssh_enabled ? '已开启' : '未开启' }}
+              </span>
+              <button
+                v-if="!trashed"
+                class="btn btn-ghost btn-sm"
+                type="button"
+                :disabled="!!busy"
+                @click="tenant.ssh_enabled ? (sshDisableOpen = true) : setSSH(true)"
+              >
+                {{ busy === 'ssh' ? '处理中…' : tenant.ssh_enabled ? '关闭 SSH' : '开启 SSH' }}
+              </button>
+            </span>
+          </div>
+        </div>
+        <div v-if="tenant.ssh_enabled && sshCommand" style="margin-top: 12px">
+          <CopyField label="SSH 登录命令" :value="sshCommand" />
+        </div>
+        <div
+          v-if="tenant.ssh_enabled && ssh?.status.problem"
+          class="row small"
+          style="color: var(--amber); margin-top: 10px"
+        >
+          <AlertTriangle :size="15" /> {{ ssh.status.problem }}
         </div>
       </div>
 
@@ -479,6 +594,10 @@ function download(backup: Backup) {
           <div class="field"><label>CPU 上限</label><input v-model="quota.cpu_quota" class="input mono" placeholder="200%" :disabled="trashed" /></div>
           <div class="field"><label>内存上限</label><input v-model="quota.memory_max" class="input mono" placeholder="4G" :disabled="trashed" /></div>
           <div class="field"><label>进程数上限</label><input v-model.number="quota.tasks_max" class="input mono" type="number" min="1" :disabled="trashed" /></div>
+          <div class="field">
+            <label>磁盘上限（GB，0 = 不限制）</label>
+            <input v-model.number="quota.disk_quota_gb" class="input mono" type="number" min="0" :disabled="trashed" />
+          </div>
         </div>
         <div v-if="!trashed" class="form-actions">
           <button class="btn btn-primary" type="button" :disabled="busy === 'quota'" @click="saveQuota">
@@ -495,6 +614,9 @@ function download(backup: Backup) {
         </button>
         <button class="tab" :class="{ active: tab === 'backups' }" type="button" @click="tab = 'backups'">
           <Download :size="14" style="vertical-align: -2px" /> 备份（{{ backups.length }}）
+        </button>
+        <button class="tab" :class="{ active: tab === 'usage' }" type="button" @click="tab = 'usage'">
+          <Activity :size="14" style="vertical-align: -2px" /> 用量
         </button>
         <button class="tab" :class="{ active: tab === 'audit' }" type="button" @click="tab = 'audit'">
           <ScrollText :size="14" style="vertical-align: -2px" /> 操作记录
@@ -539,6 +661,37 @@ function download(backup: Backup) {
           </table>
         </div>
         <EmptyState v-else title="还没有备份" hint="点“立即备份”生成第一份，或者等每天凌晨的自动备份。" />
+      </div>
+
+      <div v-else-if="tab === 'usage'">
+        <div class="row-between" style="margin-bottom: 12px; flex-wrap: wrap; gap: 10px">
+          <span class="small muted-2">每 5 分钟记一个点，最多查最近 7 天</span>
+          <div class="btn-row">
+            <button class="btn btn-sm" :class="{ 'btn-primary': usageWindow === '24h' }" type="button" @click="usageWindow = '24h'">最近 24 小时</button>
+            <button class="btn btn-sm" :class="{ 'btn-primary': usageWindow === '7d' }" type="button" @click="usageWindow = '7d'">最近 7 天</button>
+            <button class="btn btn-sm" type="button" :disabled="usageLoading" @click="loadUsage">
+              <RefreshCw :size="14" :class="{ spin: usageLoading }" /> 刷新
+            </button>
+          </div>
+        </div>
+        <div v-if="usageError" class="small" style="color: var(--red); margin-bottom: 10px">{{ usageError }}</div>
+        <div v-if="!usage.length && !usageLoading" class="muted small" style="padding: 20px 0">
+          还没有用量记录。实例运行满 5 分钟后就会出现第一个点。
+        </div>
+        <div v-else class="stack" style="gap: 22px">
+          <div>
+            <div class="card-title" style="margin-bottom: 6px">CPU</div>
+            <LineChart :labels="usageLabels" :series="cpuSeries" :format="(v) => formatPercent(v)" />
+          </div>
+          <div>
+            <div class="card-title" style="margin-bottom: 6px">内存</div>
+            <LineChart :labels="usageLabels" :series="memorySeries" :format="(v) => formatBytes(v)" />
+          </div>
+          <div>
+            <div class="card-title" style="margin-bottom: 6px">磁盘</div>
+            <LineChart :labels="usageLabels" :series="diskSeries" :format="(v) => formatBytes(v)" />
+          </div>
+        </div>
       </div>
 
       <div v-else>
@@ -662,6 +815,16 @@ function download(backup: Backup) {
       </button>
     </template>
   </Modal>
+
+  <ConfirmDialog
+    :open="sshDisableOpen"
+    title="关闭 SSH 登录"
+    message="关闭后，这个账号会改回不能登录的 shell，密码也会被锁定，员工不能再通过 SSH 进入服务器。网页访问和现有密码不受影响。"
+    confirm-text="关闭 SSH"
+    danger
+    @cancel="sshDisableOpen = false"
+    @confirm="setSSH(false)"
+  />
 
   <Modal v-if="password" :title="passwordTitle" @close="password = ''">
     <CopyField label="新密码" :value="password" />

@@ -10,8 +10,8 @@ import (
 )
 
 const tenantCols = `id, username, display_name, uid, gid, port, status, version,
-	cpu_quota, memory_max, tasks_max, home_dir, data_dir, unit_name, notes,
-	disk_bytes, disk_checked_at, last_health_at, last_health_ok, last_active_at, last_error,
+	cpu_quota, memory_max, tasks_max, home_dir, data_dir, unit_name, notes, ssh_enabled,
+	disk_bytes, disk_quota_gb, disk_checked_at, last_health_at, last_health_ok, last_active_at, last_error,
 	created_at, updated_at, deleted_at, trash_path`
 
 func scanTenant(row interface{ Scan(...any) error }) (*domain.Tenant, error) {
@@ -19,8 +19,8 @@ func scanTenant(row interface{ Scan(...any) error }) (*domain.Tenant, error) {
 	err := row.Scan(
 		&t.ID, &t.Username, &t.DisplayName, &t.UID, &t.GID, &t.Port, &t.Status, &t.Version,
 		&t.CPUQuota, &t.MemoryMax, &t.TasksMax, &t.HomeDir, &t.DataDir, &t.UnitName, &t.Notes,
-		&t.DiskBytes, &t.DiskChecked, &t.LastHealthAt, &t.LastHealthOK, &t.LastActiveAt, &t.LastError,
-		&t.CreatedAt, &t.UpdatedAt, &t.DeletedAt, &t.TrashPath,
+		&t.SSHEnabled, &t.DiskBytes, &t.DiskQuotaGB, &t.DiskChecked, &t.LastHealthAt, &t.LastHealthOK,
+		&t.LastActiveAt, &t.LastError, &t.CreatedAt, &t.UpdatedAt, &t.DeletedAt, &t.TrashPath,
 	)
 	if err != nil {
 		return nil, err
@@ -35,13 +35,13 @@ func (s *Store) CreateTenant(t *domain.Tenant) error {
 	t.UpdatedAt = now()
 	res, err := s.db.Exec(`INSERT INTO tenants
 		(username, display_name, uid, gid, port, status, version, cpu_quota, memory_max, tasks_max,
-		 home_dir, data_dir, unit_name, notes, disk_bytes, disk_checked_at, last_health_at,
-		 last_health_ok, last_active_at, last_error, created_at, updated_at, deleted_at, trash_path)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		 home_dir, data_dir, unit_name, notes, ssh_enabled, disk_bytes, disk_quota_gb, disk_checked_at,
+		 last_health_at, last_health_ok, last_active_at, last_error, created_at, updated_at, deleted_at, trash_path)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		t.Username, t.DisplayName, t.UID, t.GID, t.Port, t.Status, t.Version, t.CPUQuota,
-		t.MemoryMax, t.TasksMax, t.HomeDir, t.DataDir, t.UnitName, t.Notes, t.DiskBytes,
-		t.DiskChecked, t.LastHealthAt, t.LastHealthOK, t.LastActiveAt, t.LastError, t.CreatedAt, t.UpdatedAt,
-		t.DeletedAt, t.TrashPath)
+		t.MemoryMax, t.TasksMax, t.HomeDir, t.DataDir, t.UnitName, t.Notes, t.SSHEnabled,
+		t.DiskBytes, t.DiskQuotaGB, t.DiskChecked, t.LastHealthAt, t.LastHealthOK, t.LastActiveAt,
+		t.LastError, t.CreatedAt, t.UpdatedAt, t.DeletedAt, t.TrashPath)
 	if err != nil {
 		return err
 	}
@@ -53,12 +53,14 @@ func (s *Store) UpdateTenant(t *domain.Tenant) error {
 	t.UpdatedAt = now()
 	_, err := s.db.Exec(`UPDATE tenants SET
 		display_name=?, uid=?, gid=?, port=?, status=?, version=?, cpu_quota=?, memory_max=?,
-		tasks_max=?, home_dir=?, data_dir=?, unit_name=?, notes=?, disk_bytes=?, disk_checked_at=?,
-		last_health_at=?, last_health_ok=?, last_active_at=?, last_error=?, updated_at=?, deleted_at=?, trash_path=?
+		tasks_max=?, home_dir=?, data_dir=?, unit_name=?, notes=?, ssh_enabled=?, disk_bytes=?,
+		disk_quota_gb=?, disk_checked_at=?, last_health_at=?, last_health_ok=?, last_active_at=?,
+		last_error=?, updated_at=?, deleted_at=?, trash_path=?
 		WHERE id=?`,
 		t.DisplayName, t.UID, t.GID, t.Port, t.Status, t.Version, t.CPUQuota, t.MemoryMax,
-		t.TasksMax, t.HomeDir, t.DataDir, t.UnitName, t.Notes, t.DiskBytes, t.DiskChecked,
-		t.LastHealthAt, t.LastHealthOK, t.LastActiveAt, t.LastError, t.UpdatedAt, t.DeletedAt, t.TrashPath, t.ID)
+		t.TasksMax, t.HomeDir, t.DataDir, t.UnitName, t.Notes, t.SSHEnabled, t.DiskBytes,
+		t.DiskQuotaGB, t.DiskChecked, t.LastHealthAt, t.LastHealthOK, t.LastActiveAt,
+		t.LastError, t.UpdatedAt, t.DeletedAt, t.TrashPath, t.ID)
 	return err
 }
 

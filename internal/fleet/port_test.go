@@ -2,10 +2,13 @@ package fleet
 
 import (
 	"context"
+	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"clawbench-fleet/internal/domain"
 )
@@ -78,6 +81,122 @@ func TestUpdateTenantRejectsPortOwnedByAnotherTenant(t *testing.T) {
 	}
 	if got.Port != alice.Port {
 		t.Fatalf("port changed despite the error: %d, want %d", got.Port, alice.Port)
+	}
+}
+
+func TestUpdateTenantRejectsInvalidStates(t *testing.T) {
+	t.Run("invalid port", func(t *testing.T) {
+		svc := newService(t)
+		alice := createRunning(t, svc, "alice")
+		zero := 0
+		if _, err := svc.UpdateTenant(context.Background(), alice.ID, UpdateTenantInput{Port: &zero}, AuditContext{}); err == nil {
+			t.Fatal("port 0 must be rejected")
+		}
+	})
+	t.Run("same port", func(t *testing.T) {
+		svc := newService(t)
+		alice := createRunning(t, svc, "alice")
+		same := alice.Port
+		if _, err := svc.UpdateTenant(context.Background(), alice.ID, UpdateTenantInput{Port: &same}, AuditContext{}); err != nil {
+			t.Fatalf("same port should be a no-op: %v", err)
+		}
+	})
+	t.Run("trashed", func(t *testing.T) {
+		svc := newService(t)
+		alice := createRunning(t, svc, "alice")
+		if _, err := svc.DeleteTenant(context.Background(), alice.ID, "alice", AuditContext{}); err != nil {
+			t.Fatal(err)
+		}
+		port := alice.Port + 1
+		if _, err := svc.UpdateTenant(context.Background(), alice.ID, UpdateTenantInput{Port: &port}, AuditContext{}); err == nil {
+			t.Fatal("trashed tenant must not change its port")
+		}
+	})
+	t.Run("creating", func(t *testing.T) {
+		svc := newService(t)
+		alice := createRunning(t, svc, "alice")
+		if err := svc.Store.SetTenantStatus(alice.ID, domain.StatusCreating, ""); err != nil {
+			t.Fatal(err)
+		}
+		name := "Alice"
+		if _, err := svc.UpdateTenant(context.Background(), alice.ID, UpdateTenantInput{DisplayName: &name}, AuditContext{}); err == nil {
+			t.Fatal("tenant being created must not be edited")
+		}
+	})
+}
+
+func TestUpdateTenantRejectsPortUsedByAnotherProgram(t *testing.T) {
+	svc := newService(t)
+	ctx := context.Background()
+	alice := createRunning(t, svc, "alice")
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	tcpAddr, ok := ln.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatal("listener is not TCP")
+	}
+	busy := tcpAddr.Port
+	if _, err := svc.UpdateTenant(ctx, alice.ID, UpdateTenantInput{Port: &busy}, AuditContext{}); err == nil {
+		t.Fatal("a port already listened on by another program must be rejected")
+	}
+}
+
+func TestUpdateTenantFailurePaths(t *testing.T) {
+	cases := []struct {
+		name string
+		sys  hookSystem
+	}{
+		{"write unit", hookSystem{writeUnitErr: errSimulated}},
+		{"reload", hookSystem{reloadErr: errSimulated}},
+		{"restart", hookSystem{restartErr: errSimulated}},
+		{"health", hookSystem{silentRestart: true}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := newService(t)
+			svc.healthTimeout = 150 * time.Millisecond
+			alice := createRunning(t, svc, "alice")
+			svc.Sys = tc.sys.with(svc.Sys)
+			quota := "150%"
+			if _, err := svc.UpdateTenant(context.Background(), alice.ID, UpdateTenantInput{CPUQuota: &quota}, AuditContext{}); err == nil {
+				t.Fatal("update should fail")
+			}
+		})
+	}
+}
+
+func TestApplyPortChangeRollsBackWhenConfigWriteFails(t *testing.T) {
+	svc := newService(t)
+	alice := createRunning(t, svc, "alice")
+	configDir := filepath.Join(alice.DataDir, "config")
+	if err := os.Chmod(configDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(configDir, 0o700) })
+
+	moved := *alice
+	moved.Port = alice.Port + 1
+	if err := svc.applyPortChange(&moved, alice.Port); err == nil {
+		t.Fatal("config write failure should abort the port change")
+	}
+	if moved.Port != alice.Port {
+		t.Fatalf("port not rolled back: %d", moved.Port)
+	}
+}
+
+func TestApplyPortChangeRejectsConflict(t *testing.T) {
+	svc := newService(t)
+	alice := createRunning(t, svc, "alice")
+	bob := createRunning(t, svc, "bob")
+
+	moved := *alice
+	moved.Port = bob.Port
+	if err := svc.applyPortChange(&moved, alice.Port); err == nil {
+		t.Fatal("moving onto another tenant's port must fail")
 	}
 }
 

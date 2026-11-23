@@ -6,4 +6,5 @@ const (
 	fieldTenant   = "tenant"
 	fieldPassword = "password"
 	fieldJob      = "job"
+	fieldWarning  = "warning"
 )

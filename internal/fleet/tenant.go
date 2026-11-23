@@ -62,6 +62,12 @@ type CreateTenantInput struct {
 	CPUQuota    string `json:"cpu_quota"`
 	MemoryMax   string `json:"memory_max"`
 	TasksMax    int    `json:"tasks_max"`
+	// SSHEnabled overrides the platform default for this tenant. Nil means
+	// "use the current default".
+	SSHEnabled *bool `json:"ssh_enabled"`
+	// DiskQuotaGB overrides the default disk limit. Nil means "use the
+	// default", and 0 means no limit.
+	DiskQuotaGB *int `json:"disk_quota_gb"`
 }
 
 type TenantDTO struct {
@@ -169,6 +175,11 @@ func (s *Service) CreateTenantAsync(ctx context.Context, in CreateTenantInput, a
 	}
 
 	s.createMu.Lock()
+	quota := firstIntPtr(in.DiskQuotaGB, st.DefaultDiskQuotaGB)
+	if quota < 0 {
+		s.createMu.Unlock()
+		return nil, "", errors.New("磁盘上限不能是负数（0 表示不限制）")
+	}
 	ports, portsErr := s.Store.AllocatePorts(st.PortStart, st.PortEnd, st.PortsPerTenant, 0)
 	if portsErr != nil {
 		s.createMu.Unlock()
@@ -188,6 +199,8 @@ func (s *Service) CreateTenantAsync(ctx context.Context, in CreateTenantInput, a
 		DataDir:     s.Cfg.TenantDataDir(username),
 		UnitName:    s.Cfg.UnitName(username),
 		Notes:       strings.TrimSpace(in.Notes),
+		SSHEnabled:  s.sshAllowed(st.SSHEnabled, in.SSHEnabled),
+		DiskQuotaGB: quota,
 	}
 	if err := s.Store.CreateTenant(t); err != nil {
 		_ = s.Store.ReleasePorts(0)
@@ -277,6 +290,63 @@ func (s *Service) waitForCreation(ctx context.Context, id int64, timeout time.Du
 	}
 }
 
+// sshAllowed resolves the per-tenant SSH choice against the platform default
+// and the global switch. A tenant can never have SSH when the platform's own
+// config disables it.
+func (s *Service) sshAllowed(def bool, override *bool) bool {
+	if !s.Cfg.SSH.Enabled {
+		return false
+	}
+	if override != nil {
+		return *override
+	}
+	return def
+}
+
+// applySSHAccess gives the account a login shell and the password the employee
+// already uses for Clawbench. Both must succeed: a shell without a password
+// looks enabled but cannot be used.
+func (s *Service) applySSHAccess(ctx context.Context, t *domain.Tenant, password string) error {
+	if err := s.Sys.SetShell(ctx, t.Username, s.Cfg.SSH.Shell); err != nil {
+		return fmt.Errorf("设置登录 shell 失败：%w", err)
+	}
+	if err := s.Sys.SetPassword(ctx, t.Username, password); err != nil {
+		// Do not leave a login shell behind when the password did not take.
+		_ = s.Sys.SetShell(ctx, t.Username, s.Cfg.System.UserShell)
+		return fmt.Errorf("设置 SSH 密码失败：%w", err)
+	}
+	return nil
+}
+
+// revokeSSHAccess puts the account back to the platform's default state: a
+// nologin shell and a locked password. It does not touch the Clawbench web
+// login, which keeps working with the existing password.
+func (s *Service) revokeSSHAccess(ctx context.Context, t *domain.Tenant) error {
+	if err := s.Sys.SetShell(ctx, t.Username, s.Cfg.System.UserShell); err != nil {
+		return fmt.Errorf("恢复 nologin 失败：%w", err)
+	}
+	if err := s.Sys.LockPassword(ctx, t.Username); err != nil {
+		return fmt.Errorf("锁定密码失败：%w", err)
+	}
+	return nil
+}
+
+// repairSSHAccess makes sure an SSH-enabled tenant still has a usable shell.
+// A password is only installed when the caller generated a new one; otherwise
+// the existing Linux password is left untouched.
+func (s *Service) repairSSHAccess(ctx context.Context, t *domain.Tenant, newPassword string) error {
+	if !t.SSHEnabled {
+		return nil
+	}
+	if newPassword != "" {
+		return s.applySSHAccess(ctx, t, newPassword)
+	}
+	if err := s.Sys.SetShell(ctx, t.Username, s.Cfg.SSH.Shell); err != nil {
+		return fmt.Errorf("修复登录 shell 失败：%w", err)
+	}
+	return nil
+}
+
 // provisionTenant does the expensive part of creating a tenant: the Linux
 // account, the config, the systemd unit, then waiting for the instance to
 // answer its health check. Failures leave the record in place with a reason so
@@ -288,6 +358,12 @@ func (s *Service) provisionTenant(ctx context.Context, t *domain.Tenant, passwor
 	}
 	if uid, gid, err := s.Sys.LookupIDs(ctx, t.Username); err == nil {
 		t.UID, t.GID = uid, gid
+	}
+	if t.SSHEnabled {
+		if err := s.applySSHAccess(ctx, t, password); err != nil {
+			s.failCreate(t, ac, err)
+			return
+		}
 	}
 	if err := s.writeTenantConfig(t, password); err != nil {
 		s.failCreate(t, ac, fmt.Errorf("写租户配置失败：%w", err))
@@ -321,6 +397,10 @@ func (s *Service) provisionTenant(ctx context.Context, t *domain.Tenant, passwor
 	t.LastHealthOK = true
 	t.LastHealthAt = time.Now().Format(time.RFC3339)
 	t.LastError = ""
+	// A tenant stopped for exceeding its disk limit gets SSH back once it is
+	// running again; otherwise it would stay locked out until someone toggled
+	// SSH by hand.
+	s.clearSuspensionNotes(t)
 	_ = s.Store.UpdateTenant(t)
 	s.Audit(ac, "tenant.create", t, map[string]any{fieldPort: t.Port, fieldUID: t.UID}, nil)
 }
@@ -373,6 +453,16 @@ func firstInt(v, fallback int) int {
 	return v
 }
 
+// firstIntPtr is firstInt for an optional override: nil means "use the
+// default", while an explicit 0 is kept because 0 has its own meaning
+// (no disk limit).
+func firstIntPtr(v *int, fallback int) int {
+	if v == nil {
+		return fallback
+	}
+	return *v
+}
+
 type UpdateTenantInput struct {
 	DisplayName *string `json:"display_name"`
 	Notes       *string `json:"notes"`
@@ -380,6 +470,9 @@ type UpdateTenantInput struct {
 	MemoryMax   *string `json:"memory_max"`
 	TasksMax    *int    `json:"tasks_max"`
 	Port        *int    `json:"port"`
+	// DiskQuotaGB has no "leave unchanged" state on purpose: the form always
+	// sends the full value, and nil means the same as before.
+	DiskQuotaGB *int `json:"disk_quota_gb"`
 }
 
 func (s *Service) UpdateTenant(ctx context.Context, id int64, in UpdateTenantInput, ac AuditContext) (*domain.Tenant, error) {
@@ -472,6 +565,15 @@ func (s *Service) applyTenantChanges(t *domain.Tenant, in UpdateTenantInput) err
 			return errors.New("进程数上限必须大于 0")
 		}
 		t.TasksMax = *in.TasksMax
+	}
+	if in.DiskQuotaGB != nil {
+		if *in.DiskQuotaGB < 0 {
+			return errors.New("磁盘上限不能是负数（0 表示不限制）")
+		}
+		if t.Status == domain.StatusTrashed {
+			return errors.New("回收站里的租户不能修改磁盘上限")
+		}
+		t.DiskQuotaGB = *in.DiskQuotaGB
 	}
 	return nil
 }
@@ -575,6 +677,9 @@ func (s *Service) StartTenant(ctx context.Context, id int64, ac AuditContext) (*
 	}
 	defer s.release()
 
+	if err := s.diskGuardBeforeStart(ctx, t); err != nil {
+		return nil, err
+	}
 	if err := s.Sys.Enable(ctx, t.UnitName); err != nil {
 		return nil, s.failTenant(t, "tenant.start", "启动失败", err, ac)
 	}
@@ -631,6 +736,9 @@ func (s *Service) RestartTenant(ctx context.Context, id int64, ac AuditContext) 
 		return nil, err
 	}
 	defer s.release()
+	if err := s.diskGuardBeforeStart(ctx, t); err != nil {
+		return nil, err
+	}
 	if err := s.Sys.Restart(ctx, t.UnitName); err != nil {
 		return nil, s.failTenant(t, "tenant.restart", "重启失败", err, ac)
 	}
@@ -643,6 +751,7 @@ func (s *Service) RestartTenant(ctx context.Context, id int64, ac AuditContext) 
 	t.LastHealthOK = true
 	t.LastHealthAt = time.Now().Format(time.RFC3339)
 	t.LastError = ""
+	s.clearSuspensionNotes(t)
 	_ = s.Store.UpdateTenant(t)
 	s.Audit(ac, "tenant.restart", t, nil, nil)
 	return t, nil
@@ -678,6 +787,14 @@ func (s *Service) ResetPassword(ctx context.Context, id int64, ac AuditContext) 
 			return nil, "", lookupErr
 		}
 		t.UID, t.GID = uid, gid
+	}
+	// Keep the Linux password in step with the Clawbench password, otherwise
+	// the employee would have two different passwords depending on how they
+	// log in.
+	if t.SSHEnabled {
+		if err := s.applySSHAccess(ctx, t, password); err != nil {
+			return nil, "", err
+		}
 	}
 	if err := s.writeTenantConfig(t, password); err != nil {
 		return nil, "", fmt.Errorf("写配置失败：%w", err)
@@ -727,6 +844,9 @@ func (s *Service) RepairTenant(ctx context.Context, id int64, ac AuditContext) (
 			return nil, "", genErr
 		}
 		newPassword = generated
+	}
+	if err := s.repairSSHAccess(ctx, t, newPassword); err != nil {
+		return nil, "", err
 	}
 	if err := s.writeTenantConfig(t, newPassword); err != nil {
 		return nil, "", err
@@ -886,6 +1006,7 @@ func (s *Service) RestoreTenant(ctx context.Context, id int64, ac AuditContext) 
 	t.TrashPath = ""
 	_ = s.Store.UpdateTenant(t)
 	_ = s.Store.SetPortsAllocated(t.ID)
+	_ = s.Store.PurgeMetricSamplesForTenant(t.ID)
 	if trashPath != "" {
 		_ = os.RemoveAll(trashPath)
 	}
@@ -916,9 +1037,14 @@ func (s *Service) restoreAccount(ctx context.Context, t *domain.Tenant, uid int)
 // waits for it to answer its health check. The password is only regenerated
 // when the config file was lost with the trash.
 func (s *Service) startRestoredTenant(ctx context.Context, t *domain.Tenant, ac AuditContext) (*domain.HealthInfo, string, error) {
-	newPassword, pwdErr := s.passwordIfConfigMissing(t)
+	newPassword, pwdErr := s.passwordForRestore(t)
 	if pwdErr != nil {
 		return nil, "", pwdErr
+	}
+	if t.SSHEnabled {
+		if err := s.applySSHAccess(ctx, t, newPassword); err != nil {
+			return nil, newPassword, err
+		}
 	}
 	if err := s.writeTenantConfig(t, newPassword); err != nil {
 		return nil, newPassword, err
@@ -978,6 +1104,16 @@ func (s *Service) passwordIfConfigMissing(t *domain.Tenant) (string, error) {
 	return "", nil
 }
 
+// passwordForRestore also regenerates the password for SSH-enabled tenants:
+// deleting the account removed its shadow entry, so the old password cannot be
+// brought back even though the Clawbench config still holds its hash.
+func (s *Service) passwordForRestore(t *domain.Tenant) (string, error) {
+	if t.SSHEnabled {
+		return GeneratePassword(12)
+	}
+	return s.passwordIfConfigMissing(t)
+}
+
 func (s *Service) PurgeTenant(ctx context.Context, id int64, ac AuditContext) error {
 	t, err := s.tenantByID(id)
 	if err != nil {
@@ -1008,22 +1144,50 @@ func (s *Service) PurgeTenant(ctx context.Context, id int64, ac AuditContext) er
 
 // --- bulk ---
 
+// BulkRequest is one batch action on a set of tenants. Quota carries the new
+// limits for the "quota" action and is ignored for the others.
+type BulkRequest struct {
+	Action      string  `json:"action"`
+	IDs         []int64 `json:"ids"`
+	CPUQuota    string  `json:"cpu_quota"`
+	MemoryMax   string  `json:"memory_max"`
+	TasksMax    int     `json:"tasks_max"`
+	DiskQuotaGB *int    `json:"disk_quota_gb"`
+}
+
 func (s *Service) BulkAction(ctx context.Context, action string, ids []int64, ac AuditContext) (*domain.Job, error) {
-	if len(ids) == 0 {
+	return s.Bulk(ctx, BulkRequest{Action: action, IDs: ids}, ac)
+}
+
+// Bulk runs one batch action in the background. Every action reports per-tenant
+// results as job items; "reset-password" also leaves a downloadable CSV, because
+// plaintext passwords must not stay in the database and the operator has to
+// hand each one to its owner.
+func (s *Service) Bulk(ctx context.Context, req BulkRequest, ac AuditContext) (*domain.Job, error) {
+	if len(req.IDs) == 0 {
 		return nil, errors.New("没有选中租户")
 	}
-	switch action {
-	case "start", "stop", "restart":
+	switch req.Action {
+	case "start", "stop", "restart", "quota", bulkResetPasswordAction:
 	default:
-		return nil, fmt.Errorf("不支持的批量操作 %q", action)
+		return nil, fmt.Errorf("不支持的批量操作 %q", req.Action)
 	}
-	payload, _ := json.Marshal(map[string]any{"action": action, "ids": ids})
-	job, err := s.Store.CreateJob("bulk", string(payload), len(ids))
+	if req.Action == "quota" {
+		if err := validateBulkQuota(req); err != nil {
+			return nil, err
+		}
+	}
+	payload, _ := json.Marshal(req)
+	jobType := "bulk"
+	if req.Action == bulkResetPasswordAction {
+		jobType = "bulk-reset-password"
+	}
+	job, err := s.Store.CreateJob(jobType, string(payload), len(req.IDs))
 	if err != nil {
 		return nil, err
 	}
-	itemIDs := make([]int64, 0, len(ids))
-	for _, id := range ids {
+	itemIDs := make([]int64, 0, len(req.IDs))
+	for _, id := range req.IDs {
 		t, err := s.Store.GetTenant(id)
 		name := fmt.Sprintf("#%d", id)
 		if err == nil {
@@ -1035,23 +1199,44 @@ func (s *Service) BulkAction(ctx context.Context, action string, ids []int64, ac
 		}
 		itemIDs = append(itemIDs, itemID)
 	}
-	go s.runBulk(context.WithoutCancel(ctx), job.ID, action, ids, itemIDs, ac)
+	go s.runBulk(context.WithoutCancel(ctx), job.ID, req, itemIDs, ac)
 	return job, nil
 }
 
-func (s *Service) runBulk(ctx context.Context, jobID int64, action string, ids, itemIDs []int64, ac AuditContext) {
+func validateBulkQuota(req BulkRequest) error {
+	if !cpuQuotaRe.MatchString(req.CPUQuota) {
+		return errors.New("CPU 上限格式不对，例如 200%")
+	}
+	if !memoryMaxRe.MatchString(req.MemoryMax) {
+		return errors.New("内存上限格式不对，例如 4G")
+	}
+	if req.TasksMax < 1 {
+		return errors.New("进程数上限必须大于 0")
+	}
+	if req.DiskQuotaGB != nil && *req.DiskQuotaGB < 0 {
+		return errors.New("磁盘上限不能是负数（0 表示不限制）")
+	}
+	return nil
+}
+
+func (s *Service) runBulk(ctx context.Context, jobID int64, req BulkRequest, itemIDs []int64, ac AuditContext) {
 	_ = s.Store.MarkJobRunning(jobID)
+	secrets := newSecretCollector()
 	done, failed := 0, 0
-	for i, id := range ids {
+	for i, id := range req.IDs {
 		_ = s.Store.UpdateJobItem(itemIDs[i], domain.JobRunning, "")
 		var err error
-		switch action {
+		switch req.Action {
 		case "start":
 			_, err = s.StartTenant(ctx, id, ac)
 		case "stop":
 			_, err = s.StopTenant(ctx, id, ac)
 		case "restart":
 			_, err = s.RestartTenant(ctx, id, ac)
+		case "quota":
+			err = s.bulkApplyQuota(ctx, id, req, ac)
+		case bulkResetPasswordAction:
+			err = s.bulkResetPassword(ctx, id, secrets, ac)
 		}
 		done++
 		status := domain.JobSucceeded
@@ -1064,6 +1249,9 @@ func (s *Service) runBulk(ctx context.Context, jobID int64, action string, ids, 
 		_ = s.Store.UpdateJobItem(itemIDs[i], status, errText)
 		_ = s.Store.UpdateJobProgress(jobID, done, failed)
 	}
+	if req.Action == bulkResetPasswordAction {
+		secrets.save(s, jobID)
+	}
 	result, _ := json.Marshal(map[string]any{fieldDone: done, statusFailed: failed})
 	final := domain.JobSucceeded
 	if failed == done {
@@ -1072,6 +1260,29 @@ func (s *Service) runBulk(ctx context.Context, jobID int64, action string, ids, 
 		final = domain.JobPartial
 	}
 	_ = s.Store.FinishJob(jobID, final, string(result))
+}
+
+// bulkApplyQuota sets the same resource limits on one tenant. Port and disk
+// limits go through the normal update path so validation and restarts behave
+// exactly like the detail page.
+func (s *Service) bulkApplyQuota(ctx context.Context, id int64, req BulkRequest, ac AuditContext) error {
+	cpu, mem, tasks := req.CPUQuota, req.MemoryMax, req.TasksMax
+	in := UpdateTenantInput{CPUQuota: &cpu, MemoryMax: &mem, TasksMax: &tasks, DiskQuotaGB: req.DiskQuotaGB}
+	_, err := s.UpdateTenant(ctx, id, in, ac)
+	return err
+}
+
+// bulkResetPassword resets one tenant and keeps the plaintext only in memory
+// until the batch ends, then writes it into the job's download.
+func (s *Service) bulkResetPassword(ctx context.Context, id int64, secrets *secretCollector, ac AuditContext) error {
+	_, password, err := s.ResetPassword(ctx, id, ac)
+	if password != "" && secrets != nil {
+		t, lookupErr := s.tenantByID(id)
+		if lookupErr == nil {
+			secrets.add(t.Username, password)
+		}
+	}
+	return err
 }
 
 // --- import ---
@@ -1206,6 +1417,37 @@ func (s *Service) Artifact(jobID int64, name string) ([]byte, bool) {
 	defer s.artifactsMu.Unlock()
 	data, ok := s.artifacts[jobID][name]
 	return data, ok
+}
+
+// secretCollector holds generated passwords in memory for the length of one
+// batch, then turns them into a downloadable CSV and forgets them. Plaintext
+// never touches the database.
+type secretCollector struct {
+	mu   sync.Mutex
+	rows [][2]string
+}
+
+func newSecretCollector() *secretCollector { return &secretCollector{} }
+
+func (c *secretCollector) add(username, password string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.rows = append(c.rows, [2]string{username, password})
+}
+
+func (c *secretCollector) save(s *Service, jobID int64) {
+	c.mu.Lock()
+	rows := append([][2]string(nil), c.rows...)
+	c.rows = nil
+	c.mu.Unlock()
+	var buf bytes.Buffer
+	w := csv.NewWriter(&buf)
+	_ = w.Write([]string{"username", "password"})
+	for _, row := range rows {
+		_ = w.Write([]string{row[0], row[1]})
+	}
+	w.Flush()
+	s.setArtifact(jobID, "passwords.csv", buf.Bytes())
 }
 
 // --- file helpers ---

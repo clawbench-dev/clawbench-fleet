@@ -37,6 +37,13 @@ func freePort(t *testing.T) int {
 
 func newTestService(t *testing.T) (*Service, config.Config) {
 	t.Helper()
+	return newTestServiceWith(t, nil)
+}
+
+// newTestServiceWith lets a test wrap the simulated system, e.g. to record
+// the shell and password calls SSH provisioning makes.
+func newTestServiceWith(t *testing.T, wrap func(sysops.System) sysops.System) (*Service, config.Config) {
+	t.Helper()
 	dir := t.TempDir()
 	cfg := config.Default()
 	cfg.DataDir = filepath.Join(dir, "data")
@@ -61,7 +68,10 @@ func newTestService(t *testing.T) (*Service, config.Config) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	sys := sysops.NewFake(filepath.Join(cfg.DataDir, "dev"), cfg.Clawbench.InstallDir)
+	var sys sysops.System = sysops.NewFake(filepath.Join(cfg.DataDir, "dev"), cfg.Clawbench.InstallDir)
+	if wrap != nil {
+		sys = wrap(sys)
+	}
 	svc, err := New(cfg, st, sys)
 	if err != nil {
 		t.Fatal(err)
@@ -76,6 +86,7 @@ func TestTenantLifecycle(t *testing.T) {
 
 	tenant, password, err := svc.CreateTenant(ctx, CreateTenantInput{
 		Username: "alice", DisplayName: "张三", Notes: "研发部",
+		SSHEnabled: boolPtr(false),
 	}, ac)
 	if err != nil {
 		t.Fatalf("create: %v", err)

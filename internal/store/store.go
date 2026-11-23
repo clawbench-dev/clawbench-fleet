@@ -79,7 +79,9 @@ func (s *Store) migrate() error {
 			data_dir TEXT NOT NULL DEFAULT '',
 			unit_name TEXT NOT NULL DEFAULT '',
 			notes TEXT NOT NULL DEFAULT '',
+			ssh_enabled INTEGER NOT NULL DEFAULT 0,
 			disk_bytes INTEGER NOT NULL DEFAULT 0,
+			disk_quota_gb INTEGER NOT NULL DEFAULT 0,
 			disk_checked_at TEXT NOT NULL DEFAULT '',
 			last_health_at TEXT NOT NULL DEFAULT '',
 			last_health_ok INTEGER NOT NULL DEFAULT 0,
@@ -188,6 +190,17 @@ func (s *Store) migrate() error {
 			handled_by TEXT NOT NULL DEFAULT ''
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_guest_reports_created ON guest_reports(created_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS metric_samples (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			tenant_id INTEGER NOT NULL,
+			at TEXT NOT NULL,
+			cpu_percent REAL NOT NULL DEFAULT 0,
+			memory_bytes INTEGER NOT NULL DEFAULT 0,
+			pids INTEGER NOT NULL DEFAULT 0,
+			disk_bytes INTEGER NOT NULL DEFAULT 0
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_metric_samples_tenant ON metric_samples(tenant_id, at)`,
+		`CREATE INDEX IF NOT EXISTS idx_metric_samples_at ON metric_samples(at)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -197,6 +210,16 @@ func (s *Store) migrate() error {
 	// Databases created before last_active_at existed need the column added;
 	// SQLite has no "ADD COLUMN IF NOT EXISTS", so check first.
 	if err := s.addColumnIfMissing("tenants", "last_active_at", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("migrate: %w", err)
+	}
+	// Existing tenants keep SSH off until an operator turns it on: upgrading
+	// the platform must not silently open a login shell on old accounts.
+	if err := s.addColumnIfMissing("tenants", "ssh_enabled", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return fmt.Errorf("migrate: %w", err)
+	}
+	// Existing tenants start without a disk limit, the same way they started
+	// without SSH: an upgrade must not suddenly stop anyone's instance.
+	if err := s.addColumnIfMissing("tenants", "disk_quota_gb", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return fmt.Errorf("migrate: %w", err)
 	}
 	return nil

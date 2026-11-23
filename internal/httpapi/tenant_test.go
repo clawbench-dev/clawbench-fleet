@@ -1,8 +1,10 @@
 package httpapi
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -12,6 +14,7 @@ import (
 	"time"
 
 	"clawbench-fleet/internal/domain"
+	"clawbench-fleet/internal/sysops"
 )
 
 func createTenant(t *testing.T, c *client, username string) map[string]any {
@@ -57,6 +60,121 @@ func waitForStatus(t *testing.T, c *client, id int64) {
 
 func itoa(id int64) string {
 	return strconv.FormatInt(id, 10)
+}
+
+func TestTenantSSHOverHTTP(t *testing.T) {
+	c, _ := newTestClient(t)
+	created := createTenant(t, c, "sshusr")
+	id := tenantID(t, created)
+	waitForStatus(t, c, id)
+
+	var status struct {
+		Status struct {
+			Installed    bool   `json:"installed"`
+			Running      bool   `json:"running"`
+			PasswordAuth bool   `json:"password_auth"`
+			Port         int    `json:"port"`
+			Problem      string `json:"problem"`
+		} `json:"status"`
+		Host string `json:"host"`
+	}
+	if code := c.json(http.MethodGet, "/api/ssh/status", nil, &status); code != http.StatusOK {
+		t.Fatalf("ssh status = %d", code)
+	}
+	if !status.Status.Installed || !status.Status.Running || !status.Status.PasswordAuth || status.Host == "" {
+		t.Fatalf("ssh status payload = %+v", status)
+	}
+
+	var disabled struct {
+		Tenant struct {
+			SSHEnabled bool `json:"ssh_enabled"`
+		} `json:"tenant"`
+		Password string `json:"password"`
+	}
+	if code := c.json(http.MethodPost, "/api/tenants/"+itoa(id)+"/ssh", map[string]any{"enabled": false}, &disabled); code != http.StatusOK {
+		t.Fatalf("disable ssh = %d", code)
+	}
+	if disabled.Tenant.SSHEnabled || disabled.Password != "" {
+		t.Fatalf("disable payload = %+v", disabled)
+	}
+
+	var enabled struct {
+		Tenant struct {
+			SSHEnabled bool `json:"ssh_enabled"`
+		} `json:"tenant"`
+		Password string `json:"password"`
+	}
+	if code := c.json(http.MethodPost, "/api/tenants/"+itoa(id)+"/ssh", map[string]any{"enabled": true}, &enabled); code != http.StatusOK {
+		t.Fatalf("enable ssh = %d", code)
+	}
+	if !enabled.Tenant.SSHEnabled || enabled.Password == "" {
+		t.Fatalf("enable payload = %+v", enabled)
+	}
+}
+
+func TestTenantSSHEnableWarningOverHTTP(t *testing.T) {
+	c, platform := newTestClient(t)
+	created := createTenant(t, c, "sshwarn")
+	id := tenantID(t, created)
+	waitForStatus(t, c, id)
+	if code := c.json(http.MethodPost, "/api/tenants/"+itoa(id)+"/ssh", map[string]any{"enabled": false}, nil); code != http.StatusOK {
+		t.Fatalf("disable = %d", code)
+	}
+	platform.Svc.Sys = failingRestart{System: platform.Svc.Sys}
+	var out struct {
+		Tenant struct {
+			SSHEnabled bool `json:"ssh_enabled"`
+		} `json:"tenant"`
+		Password string `json:"password"`
+		Warning  string `json:"warning"`
+	}
+	if code := c.json(http.MethodPost, "/api/tenants/"+itoa(id)+"/ssh", map[string]any{"enabled": true}, &out); code != http.StatusOK {
+		t.Fatalf("enable = %d", code)
+	}
+	if !out.Tenant.SSHEnabled || out.Password == "" || out.Warning == "" {
+		t.Fatalf("enable warning payload = %+v", out)
+	}
+}
+
+type failingRestart struct{ sysops.System }
+
+func (failingRestart) Restart(context.Context, string) error {
+	return errors.New("restart failed")
+}
+
+func TestTenantSSHHandlerErrors(t *testing.T) {
+	c, platform := newTestClient(t)
+	if code := c.json(http.MethodPost, "/api/tenants/not-a-number/ssh", map[string]any{"enabled": true}, nil); code != http.StatusBadRequest {
+		t.Fatalf("bad id = %d", code)
+	}
+
+	created := createTenant(t, c, "ssherr")
+	id := tenantID(t, created)
+	waitForStatus(t, c, id)
+	if code := c.json(http.MethodPost, "/api/tenants/"+itoa(id)+"/ssh", map[string]any{"enabled": false}, nil); code != http.StatusOK {
+		t.Fatalf("disable = %d", code)
+	}
+	platform.Svc.Cfg.SSH.Enabled = false
+	if code := c.json(http.MethodPost, "/api/tenants/"+itoa(id)+"/ssh", map[string]any{"enabled": true}, nil); code == http.StatusOK {
+		t.Fatal("enabling SSH should fail when the platform disables it")
+	}
+	if code := c.json(http.MethodPost, "/api/tenants/"+itoa(id)+"/ssh", []string{"not-an-object"}, nil); code != http.StatusBadRequest {
+		t.Fatalf("bad body = %d", code)
+	}
+}
+
+func TestSSHStatusHandlerReportsProbeFailure(t *testing.T) {
+	c, platform := newTestClient(t)
+	platform.Svc.Sys = failingSSHStatus{System: platform.Svc.Sys}
+	if code := c.json(http.MethodGet, "/api/ssh/status", nil, nil); code != http.StatusBadRequest {
+		t.Fatalf("ssh status probe failure = %d", code)
+	}
+}
+
+type failingSSHStatus struct{ sysops.System }
+
+func (failingSSHStatus) SSHStatus(context.Context) (sysops.SSHStatus, error) {
+	return sysops.SSHStatus{}, errors.New("probe failed")
 }
 
 func TestTenantLifecycleOverHTTP(t *testing.T) {
@@ -536,5 +654,112 @@ func TestStaticFallback(t *testing.T) {
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("unknown api = %d", resp.StatusCode)
+	}
+}
+
+func TestMetricHistoryOverHTTP(t *testing.T) {
+	c, platform := newTestClient(t)
+	created := createTenant(t, c, "histusr")
+	id := tenantID(t, created)
+	waitForStatus(t, c, id)
+	if err := platform.Svc.Store.AddMetricSample(id, domain.MetricSample{At: time.Now().Format(time.RFC3339), CPUPercent: 3}); err != nil {
+		t.Fatal(err)
+	}
+
+	var out struct {
+		Items []struct {
+			CPUPercent float64 `json:"cpu_percent"`
+		} `json:"items"`
+		Window string `json:"window"`
+	}
+	if code := c.json(http.MethodGet, "/api/tenants/"+itoa(id)+"/metrics/history", nil, &out); code != http.StatusOK {
+		t.Fatalf("history = %d", code)
+	}
+	if len(out.Items) != 1 || out.Window != "24h0m0s" {
+		t.Fatalf("history payload = %+v", out)
+	}
+	if code := c.json(http.MethodGet, "/api/tenants/"+itoa(id)+"/metrics/history?window=168h", nil, nil); code != http.StatusOK {
+		t.Fatalf("7 day history = %d", code)
+	}
+	if code := c.json(http.MethodGet, "/api/tenants/"+itoa(id)+"/metrics/history?window=nonsense", nil, nil); code != http.StatusBadRequest {
+		t.Fatalf("bad window = %d", code)
+	}
+	if code := c.json(http.MethodGet, "/api/tenants/xyz/metrics/history", nil, nil); code != http.StatusBadRequest {
+		t.Fatalf("bad id = %d", code)
+	}
+	if code := c.json(http.MethodGet, "/api/tenants/9999/metrics/history", nil, nil); code == http.StatusOK {
+		t.Fatal("unknown tenant should fail")
+	}
+}
+
+func TestBulkQuotaAndResetOverHTTP(t *testing.T) {
+	c, _ := newTestClient(t)
+	ids := make([]int64, 0, 2)
+	for _, name := range []string{"bulkone", "bulktwo"} {
+		created := createTenant(t, c, name)
+		id := tenantID(t, created)
+		waitForStatus(t, c, id)
+		ids = append(ids, id)
+	}
+
+	var quota struct {
+		Job struct {
+			ID int64 `json:"id"`
+		} `json:"job"`
+	}
+	if code := c.json(http.MethodPost, "/api/tenants/bulk", map[string]any{
+		"action": "quota", "ids": ids, "cpu_quota": "120%", "memory_max": "3G", "tasks_max": 128,
+	}, &quota); code != http.StatusAccepted {
+		t.Fatalf("bulk quota = %d", code)
+	}
+	var reset struct {
+		Job struct {
+			ID int64 `json:"id"`
+		} `json:"job"`
+	}
+	if code := c.json(http.MethodPost, "/api/tenants/bulk", map[string]any{
+		"action": "reset-password", "ids": ids,
+	}, &reset); code != http.StatusAccepted {
+		t.Fatalf("bulk reset = %d", code)
+	}
+	if code := c.json(http.MethodPost, "/api/tenants/bulk", map[string]any{
+		"action": "quota", "ids": ids, "cpu_quota": "bad", "memory_max": "3G", "tasks_max": 128,
+	}, nil); code != http.StatusBadRequest {
+		t.Fatalf("invalid quota = %d", code)
+	}
+}
+
+func TestBulkResetPasswordsDownload(t *testing.T) {
+	c, _ := newTestClient(t)
+	created := createTenant(t, c, "csvusr")
+	id := tenantID(t, created)
+	waitForStatus(t, c, id)
+
+	var accepted struct {
+		Job struct {
+			ID int64 `json:"id"`
+		} `json:"job"`
+	}
+	if code := c.json(http.MethodPost, "/api/tenants/bulk", map[string]any{
+		"action": "reset-password", "ids": []int64{id},
+	}, &accepted); code != http.StatusAccepted {
+		t.Fatalf("bulk reset = %d", code)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		var job struct {
+			Job struct {
+				Status string `json:"status"`
+			} `json:"job"`
+		}
+		if code := c.json(http.MethodGet, "/api/jobs/"+itoa(accepted.Job.ID), nil, &job); code == http.StatusOK &&
+			(job.Job.Status == "succeeded" || job.Job.Status == "partial") {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	status, body := c.request(http.MethodGet, "/api/jobs/"+itoa(accepted.Job.ID)+"/artifacts/passwords.csv", nil)
+	if status != http.StatusOK || !strings.Contains(string(body), "csvusr") {
+		t.Fatalf("passwords.csv = %d %s", status, body)
 	}
 }

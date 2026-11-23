@@ -42,6 +42,17 @@ type Listener struct {
 	Cwd  string
 }
 
+// SSHStatus is what the platform can learn about the machine's SSH server
+// without changing its configuration. The platform only prepares tenant
+// accounts; whether sshd accepts them is the operator's policy.
+type SSHStatus struct {
+	Installed    bool   `json:"installed"`
+	Running      bool   `json:"running"`
+	PasswordAuth bool   `json:"password_auth"`
+	Port         int    `json:"port"`
+	Problem      string `json:"problem"`
+}
+
 // System is the narrow slice of the operating system the platform needs.
 // Everything here is implemented twice: once with real commands (Real) and
 // once in memory (Fake) so the whole product can be exercised without root.
@@ -54,6 +65,22 @@ type System interface {
 	LookupIDs(ctx context.Context, username string) (uid, gid int, err error)
 	UsedUIDs(ctx context.Context) (map[int]bool, error)
 	Chown(ctx context.Context, path string, uid, gid int) error
+
+	// SetPassword installs a password for username. It is used both for the
+	// Clawbench web login and, when SSH is enabled, for the Linux account.
+	SetPassword(ctx context.Context, username, password string) error
+	// SetShell changes the login shell, e.g. from nologin to bash.
+	SetShell(ctx context.Context, username, shell string) error
+	// LockPassword locks the account password so SSH cannot be used until a
+	// new password is set.
+	LockPassword(ctx context.Context, username string) error
+	// KillUserProcesses ends every process owned by username, including ones
+	// that escaped the systemd unit (an SSH shell, a background build). It is
+	// used when a tenant has to be shut down for exceeding its disk limit.
+	KillUserProcesses(ctx context.Context, username string) error
+	// SSHStatus reports whether this machine's sshd exists, runs, and accepts
+	// password logins. It never edits sshd_config.
+	SSHStatus(ctx context.Context) (SSHStatus, error)
 
 	// ListUsers enumerates local accounts. Adopting an existing instance
 	// starts from this list, not from the database.
@@ -155,9 +182,19 @@ func run(ctx context.Context, name string, args ...string) (string, error) {
 }
 
 func runWithin(ctx context.Context, timeout time.Duration, name string, args ...string) (string, error) {
+	return runInput(ctx, timeout, "", name, args...)
+}
+
+// runInput is runWithin with something on stdin. chpasswd is the one command
+// that needs it: the password must not appear on the command line, where every
+// user on the machine could read it from ps.
+func runInput(ctx context.Context, timeout time.Duration, input, name string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, name, args...)
+	if input != "" {
+		cmd.Stdin = strings.NewReader(input)
+	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		var exit *exec.ExitError

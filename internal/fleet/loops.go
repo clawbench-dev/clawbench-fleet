@@ -12,6 +12,54 @@ func (s *Service) Run(ctx context.Context) {
 	go s.healthLoop(ctx)
 	go s.metricsLoop(ctx)
 	go s.dailyLoop(ctx)
+	go s.diskLoop(ctx)
+}
+
+// diskLoop enforces the per-tenant disk limit. Measuring every home directory
+// walks the whole tree, so it runs every few minutes rather than with the
+// ten-second metrics loop.
+func (s *Service) diskLoop(ctx context.Context) {
+	timer := time.NewTimer(15 * time.Second)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+		s.enforceDiskLimits(ctx)
+		timer.Reset(5 * time.Minute)
+	}
+}
+
+func (s *Service) enforceDiskLimits(ctx context.Context) {
+	tenants, err := s.allTenants()
+	if err != nil {
+		return
+	}
+	for i := range tenants {
+		t := tenants[i]
+		if t.Status != domain.StatusRunning || t.DiskQuotaGB <= 0 {
+			continue
+		}
+		unlock, ok := s.locks.TryLock(t.Username)
+		if !ok {
+			continue
+		}
+		checkCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		size, sizeErr := s.Sys.DiskUsage(checkCtx, t.HomeDir)
+		cancel()
+		if sizeErr != nil {
+			unlock()
+			continue
+		}
+		t.DiskBytes = size
+		_ = s.Store.SetTenantDisk(t.ID, size, time.Now().Format(time.RFC3339))
+		if diskOverLimit(&t, size) {
+			s.enforceDiskLimit(ctx, &t)
+		}
+		unlock()
+	}
 }
 
 func (s *Service) healthLoop(ctx context.Context) {
@@ -80,8 +128,60 @@ func (s *Service) metricsLoop(ctx context.Context) {
 		case <-timer.C:
 		}
 		s.RefreshMetrics(ctx)
+		s.recordMetricSamples(ctx)
 		timer.Reset(10 * time.Second)
 	}
+}
+
+// recordMetricSamples appends one history point per running tenant every five
+// minutes. That is frequent enough to see a spike after the fact and cheap
+// enough to keep for a week.
+func (s *Service) recordMetricSamples(ctx context.Context) {
+	if time.Since(s.lastSample) < sampleInterval {
+		return
+	}
+	s.lastSample = time.Now()
+	at := s.lastSample.Format(time.RFC3339)
+	tenants, err := s.Store.ListTenantsByStatus(domain.StatusRunning)
+	if err != nil {
+		return
+	}
+	for _, t := range tenants {
+		m := s.GetMetrics(t.ID)
+		_ = s.Store.AddMetricSample(t.ID, domain.MetricSample{
+			At:          at,
+			CPUPercent:  m.CPUPercent,
+			MemoryBytes: m.MemoryBytes,
+			PIDs:        m.PIDs,
+			DiskBytes:   t.DiskBytes,
+		})
+	}
+	s.purgeMetricSamples(ctx)
+}
+
+// purgeMetricSamples drops history older than the retention window once a day.
+func (s *Service) purgeMetricSamples(ctx context.Context) {
+	retention := s.Settings().MetricsRetention
+	if retention <= 0 || !s.shouldRun("metrics", 4) {
+		return
+	}
+	cutoff := time.Now().Add(-time.Duration(retention) * 24 * time.Hour)
+	_, _ = s.Store.PurgeMetricSamples(cutoff)
+	_ = ctx
+}
+
+// MetricHistory returns the usage history for one tenant over the last window.
+func (s *Service) MetricHistory(id int64, window time.Duration) ([]domain.MetricSample, error) {
+	if _, err := s.tenantByID(id); err != nil {
+		return nil, err
+	}
+	if window <= 0 {
+		window = 24 * time.Hour
+	}
+	if window > 7*24*time.Hour {
+		window = 7 * 24 * time.Hour
+	}
+	return s.Store.MetricHistory(id, time.Now().Add(-window), 5000)
 }
 
 func (s *Service) RefreshMetrics(ctx context.Context) {

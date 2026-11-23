@@ -15,22 +15,30 @@ const (
 
 // Tenant is one Linux account plus one Clawbench instance.
 type Tenant struct {
-	ID           int64  `json:"id"`
-	Username     string `json:"username"`
-	DisplayName  string `json:"display_name"`
-	UID          int    `json:"uid"`
-	GID          int    `json:"gid"`
-	Port         int    `json:"port"`
-	Status       string `json:"status"`
-	Version      string `json:"version"`
-	CPUQuota     string `json:"cpu_quota"`
-	MemoryMax    string `json:"memory_max"`
-	TasksMax     int    `json:"tasks_max"`
-	HomeDir      string `json:"home_dir"`
-	DataDir      string `json:"data_dir"`
-	UnitName     string `json:"unit_name"`
-	Notes        string `json:"notes"`
-	DiskBytes    int64  `json:"disk_bytes"`
+	ID          int64  `json:"id"`
+	Username    string `json:"username"`
+	DisplayName string `json:"display_name"`
+	UID         int    `json:"uid"`
+	GID         int    `json:"gid"`
+	Port        int    `json:"port"`
+	Status      string `json:"status"`
+	Version     string `json:"version"`
+	CPUQuota    string `json:"cpu_quota"`
+	MemoryMax   string `json:"memory_max"`
+	TasksMax    int    `json:"tasks_max"`
+	HomeDir     string `json:"home_dir"`
+	DataDir     string `json:"data_dir"`
+	UnitName    string `json:"unit_name"`
+	Notes       string `json:"notes"`
+	// SSHEnabled says whether the account has a login shell and a usable
+	// password. The password itself is never stored here: only the Linux
+	// password hash exists, and the plaintext is shown once at creation or
+	// reset.
+	SSHEnabled bool  `json:"ssh_enabled"`
+	DiskBytes  int64 `json:"disk_bytes"`
+	// DiskQuotaGB is the hard limit for the home directory. Zero means no
+	// limit. Going over it stops the instance and suspends SSH access.
+	DiskQuotaGB  int    `json:"disk_quota_gb"`
 	DiskChecked  string `json:"disk_checked_at"`
 	LastHealthAt string `json:"last_health_at"`
 	LastHealthOK bool   `json:"last_health_ok"`
@@ -154,6 +162,10 @@ type Settings struct {
 	DefaultMemoryMax string `json:"default_memory_max"`
 	DefaultTasksMax  int    `json:"default_tasks_max"`
 	DiskWarnGB       int    `json:"disk_warn_gb"`
+	// DefaultDiskQuotaGB applies to new tenants; zero means no limit.
+	DefaultDiskQuotaGB int `json:"default_disk_quota_gb"`
+	// MetricsRetention controls how long the usage history is kept.
+	MetricsRetention int    `json:"metrics_retention_days"`
 	BackupEnabled    bool   `json:"backup_enabled"`
 	BackupHour       int    `json:"backup_hour"`
 	BackupRetention  int    `json:"backup_retention_days"`
@@ -164,6 +176,8 @@ type Settings struct {
 	GuestEnabled     bool   `json:"guest_enabled"`
 	GuestNotice      string `json:"guest_notice"`
 	GuestHelp        string `json:"guest_help"`
+	// SSHEnabled is the default applied to newly created tenants.
+	SSHEnabled bool `json:"ssh_enabled"`
 }
 
 type Metrics struct {
@@ -172,6 +186,17 @@ type Metrics struct {
 	PIDs        int     `json:"pids"`
 	DiskBytes   int64   `json:"disk_bytes"`
 	SampledAt   string  `json:"sampled_at"`
+}
+
+// MetricSample is one point in a tenant's usage history. Samples are taken
+// every few minutes so the detail page can draw a trend without keeping the
+// per-second values.
+type MetricSample struct {
+	At          string  `json:"at"`
+	CPUPercent  float64 `json:"cpu_percent"`
+	MemoryBytes int64   `json:"memory_bytes"`
+	PIDs        int     `json:"pids"`
+	DiskBytes   int64   `json:"disk_bytes"`
 }
 
 // GuestReport is a "my instance won't open" note left from the public page.

@@ -30,7 +30,9 @@ export interface Tenant {
   data_dir: string
   unit_name: string
   notes: string
+  ssh_enabled: boolean
   disk_bytes: number
+  disk_quota_gb: number
   disk_checked_at: string
   last_health_at: string
   last_health_ok: boolean
@@ -43,6 +45,14 @@ export interface Tenant {
   address: string
   metrics: Metrics
   protected: boolean
+}
+
+export interface MetricSample {
+  at: string
+  cpu_percent: number
+  memory_bytes: number
+  pids: number
+  disk_bytes: number
 }
 
 export interface AdoptCandidate {
@@ -154,6 +164,8 @@ export interface Settings {
   default_memory_max: string
   default_tasks_max: number
   disk_warn_gb: number
+  default_disk_quota_gb: number
+  metrics_retention_days: number
   backup_enabled: boolean
   backup_hour: number
   backup_retention_days: number
@@ -164,6 +176,15 @@ export interface Settings {
   guest_enabled: boolean
   guest_notice: string
   guest_help: string
+  ssh_enabled: boolean
+}
+
+export interface SSHStatus {
+  installed: boolean
+  running: boolean
+  password_auth: boolean
+  port: number
+  problem: string
 }
 
 export interface Overview {

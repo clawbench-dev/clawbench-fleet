@@ -108,13 +108,16 @@ func (s *Server) handleJobArtifact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := r.PathValue("name")
-	if name != "success.csv" && name != "failures.csv" {
+	// Import jobs offer success/failure lists; a batch password reset offers
+	// the generated passwords. Anything else is not a file this platform
+	// produces.
+	if name != "success.csv" && name != "failures.csv" && name != "passwords.csv" {
 		writeErr(w, http.StatusNotFound, "not_found", "没有这个结果文件")
 		return
 	}
 	data, ok := s.svc.Artifact(id, name)
 	if !ok {
-		writeErr(w, http.StatusNotFound, "not_found", "结果文件已过期，请重新导入")
+		writeErr(w, http.StatusNotFound, "not_found", "结果文件已过期，请重新执行")
 		return
 	}
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")

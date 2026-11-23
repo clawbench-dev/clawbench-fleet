@@ -24,9 +24,11 @@ type Fake struct {
 	BaseDir    string
 	InstallDir string
 
-	mu    sync.Mutex
-	users map[string]int
-	units map[string]*fakeUnit
+	mu        sync.Mutex
+	users     map[string]int
+	units     map[string]*fakeUnit
+	shells    map[string]string
+	passwords map[string]string
 }
 
 type fakeUnit struct {
@@ -51,6 +53,8 @@ func NewFake(baseDir, installDir string) *Fake {
 		InstallDir: installDir,
 		users:      map[string]int{},
 		units:      map[string]*fakeUnit{},
+		shells:     map[string]string{},
+		passwords:  map[string]string{},
 	}
 	_ = os.MkdirAll(filepath.Join(baseDir, "homes"), 0o755)
 	_ = os.MkdirAll(filepath.Join(baseDir, "units"), 0o755)
@@ -107,6 +111,7 @@ func (f *Fake) CreateUser(ctx context.Context, username string, uid int) error {
 	}
 	f.mu.Lock()
 	f.users[username] = uid
+	f.shells[username] = "/usr/sbin/nologin"
 	f.mu.Unlock()
 	return nil
 }
@@ -114,8 +119,63 @@ func (f *Fake) CreateUser(ctx context.Context, username string, uid int) error {
 func (f *Fake) DeleteUser(ctx context.Context, username string) error {
 	f.mu.Lock()
 	delete(f.users, username)
+	delete(f.shells, username)
+	delete(f.passwords, username)
 	f.mu.Unlock()
 	return nil
+}
+
+func (f *Fake) SetPassword(ctx context.Context, username, password string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.users[username]; !ok {
+		return fmt.Errorf("user %s not found", username)
+	}
+	f.passwords[username] = password
+	return nil
+}
+
+func (f *Fake) SetShell(ctx context.Context, username, shell string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.users[username]; !ok {
+		return fmt.Errorf("user %s not found", username)
+	}
+	f.shells[username] = shell
+	return nil
+}
+
+func (f *Fake) LockPassword(ctx context.Context, username string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.users[username]; !ok {
+		return fmt.Errorf("user %s not found", username)
+	}
+	delete(f.passwords, username)
+	return nil
+}
+
+// KillUserProcesses stops the simulated instance owned by the account, which
+// is the only process the fake knows about.
+func (f *Fake) KillUserProcesses(ctx context.Context, username string) error {
+	f.mu.Lock()
+	var units []string
+	for name, u := range f.units {
+		if u.username == username && u.server != nil {
+			units = append(units, name)
+		}
+	}
+	f.mu.Unlock()
+	for _, name := range units {
+		_ = f.Stop(ctx, name)
+	}
+	return nil
+}
+
+// SSHStatus reports a healthy sshd so the dev UI shows the same green state
+// as a correctly configured production server.
+func (f *Fake) SSHStatus(ctx context.Context) (SSHStatus, error) {
+	return SSHStatus{Installed: true, Running: true, PasswordAuth: true, Port: 22}, nil
 }
 
 func (f *Fake) LookupIDs(ctx context.Context, username string) (int, int, error) {

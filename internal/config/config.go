@@ -23,7 +23,22 @@ type Config struct {
 	Audit     AuditConfig     `yaml:"audit"`
 	TLS       TLSConfig       `yaml:"tls"`
 	System    SystemConfig    `yaml:"system"`
+	SSH       SSHConfig       `yaml:"ssh"`
 	Dev       bool            `yaml:"dev"`
+}
+
+// SSHConfig controls the shell access given to tenant accounts. The platform
+// only prepares the account (shell + password); it never edits sshd_config, so
+// the server's own SSH policy stays in the operator's hands.
+type SSHConfig struct {
+	// Enabled is the default for newly created tenants. Each tenant can still
+	// turn it off from its detail page.
+	Enabled bool `yaml:"enabled"`
+	// Shell is the login shell assigned to tenants with SSH enabled.
+	Shell string `yaml:"shell"`
+	// Port is used only for the ssh command shown in the UI. Zero means "ask
+	// sshd" and fall back to 22.
+	Port int `yaml:"port"`
 }
 
 type ClawbenchConfig struct {
@@ -37,6 +52,8 @@ type ClawbenchConfig struct {
 	DefaultMemoryMax string `yaml:"default_memory_max"`
 	DefaultTasksMax  int    `yaml:"default_tasks_max"`
 	DiskWarnGB       int    `yaml:"disk_warn_gb"`
+	// DiskQuotaGB is the default hard limit for new tenants (0 = no limit).
+	DiskQuotaGB      int    `yaml:"disk_quota_gb"`
 	AllowPortForward bool   `yaml:"allow_port_forward"`
 	PublicHost       string `yaml:"public_host"`
 	// NpmPackage is the wrapper package published to npm. The actual binary
@@ -85,6 +102,7 @@ func Default() Config {
 			DefaultMemoryMax: "4G",
 			DefaultTasksMax:  512,
 			DiskWarnGB:       5,
+			DiskQuotaGB:      0,
 			NpmPackage:       "@xulongzhe/clawbench",
 		},
 		Backup: BackupConfig{Enabled: true, Hour: 3, RetentionDays: 7},
@@ -94,6 +112,11 @@ func Default() Config {
 			HomeRoot:   "/home",
 			SystemdDir: "/etc/systemd/system",
 			UserShell:  "/usr/sbin/nologin",
+		},
+		SSH: SSHConfig{
+			Enabled: true,
+			Shell:   "/bin/bash",
+			Port:    0,
 		},
 	}
 }
@@ -132,6 +155,7 @@ func (c *Config) Normalize() error {
 	}
 	c.normalizeRetention()
 	c.normalizeSystem()
+	c.normalizeSSH()
 	return nil
 }
 
@@ -171,6 +195,9 @@ func (c *Config) normalizeClawbench() error {
 	}
 	if !strings.Contains(c.Clawbench.NpmPackage, "/") {
 		return fmt.Errorf("npm_package %q 必须是 @scope/name 形式", c.Clawbench.NpmPackage)
+	}
+	if c.Clawbench.DiskQuotaGB < 0 {
+		return fmt.Errorf("disk_quota_gb must not be negative")
 	}
 	if c.Backup.Hour < 0 || c.Backup.Hour > 23 {
 		return fmt.Errorf("backup.hour must be 0-23, got %d", c.Backup.Hour)
@@ -213,6 +240,15 @@ func (c *Config) normalizeSystem() {
 	}
 	if c.System.UserShell == "" {
 		c.System.UserShell = "/usr/sbin/nologin"
+	}
+}
+
+func (c *Config) normalizeSSH() {
+	if strings.TrimSpace(c.SSH.Shell) == "" {
+		c.SSH.Shell = "/bin/bash"
+	}
+	if c.SSH.Port < 0 || c.SSH.Port > 65535 {
+		c.SSH.Port = 0
 	}
 }
 
