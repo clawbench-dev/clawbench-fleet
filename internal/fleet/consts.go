@@ -10,4 +10,12 @@ const (
 	fieldPort    = "port"
 	fieldUID     = "uid"
 	fieldVersion = "version"
+	fieldDone    = "done"
+
+	// 以下是“默认配额”功能（另一个改动）用到的，先保留以便那部分继续编译。
+	fieldCPUQuota  = "cpu_quota"
+	fieldMemoryMax = "memory_max"
+	fieldTasksMax  = "tasks_max"
+
+	auditTenantUpdate = "tenant.update"
 )

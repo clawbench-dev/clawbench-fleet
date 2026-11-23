@@ -44,12 +44,15 @@ func (s *Server) handleAdoptTenants(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	items, err := s.svc.AdoptTenants(r.Context(), body.Usernames, auditCtx(r))
+	// Adoption restarts each instance and waits for it to answer, so the page
+	// gets a job and polls it for per-account progress instead of holding one
+	// request open for the whole batch.
+	job, err := s.svc.AdoptTenantsAsync(r.Context(), body.Usernames, auditCtx(r))
 	if err != nil {
 		writeServiceErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	writeJSON(w, http.StatusAccepted, map[string]any{fieldJob: job})
 }
 
 func (s *Server) handleCreateTenant(w http.ResponseWriter, r *http.Request) {

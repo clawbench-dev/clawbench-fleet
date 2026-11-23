@@ -354,14 +354,32 @@ func TestScanAndAdopt(t *testing.T) {
 	if status := c.json(http.MethodPost, "/api/tenants/adopt", map[string]any{"usernames": []string{}}, nil); status != http.StatusBadRequest {
 		t.Fatalf("empty adopt = %d", status)
 	}
-	var adopted struct {
-		Items []map[string]any `json:"items"`
+	var started struct {
+		Job struct {
+			ID int64 `json:"id"`
+		} `json:"job"`
 	}
-	if status := c.json(http.MethodPost, "/api/tenants/adopt", map[string]any{"usernames": []string{"ghost"}}, &adopted); status != http.StatusOK {
+	if status := c.json(http.MethodPost, "/api/tenants/adopt", map[string]any{"usernames": []string{"ghost"}}, &started); status != http.StatusAccepted {
 		t.Fatalf("adopt = %d", status)
 	}
-	if len(adopted.Items) != 1 || adopted.Items[0]["error"] == "" {
-		t.Fatalf("unknown user should be reported as an error: %+v", adopted)
+	var job struct {
+		Job domain.Job `json:"job"`
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if status := c.json(http.MethodGet, "/api/jobs/"+strconv.FormatInt(started.Job.ID, 10), nil, &job); status != http.StatusOK {
+			t.Fatalf("job = %d", status)
+		}
+		if job.Job.Status == domain.JobSucceeded || job.Job.Status == domain.JobFailed || job.Job.Status == domain.JobPartial {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("adopt job did not finish: %+v", job.Job)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if len(job.Job.Items) != 1 || job.Job.Items[0].Error == "" {
+		t.Fatalf("unknown user should be reported as an error: %+v", job.Job)
 	}
 }
 

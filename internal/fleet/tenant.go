@@ -379,6 +379,7 @@ type UpdateTenantInput struct {
 	CPUQuota    *string `json:"cpu_quota"`
 	MemoryMax   *string `json:"memory_max"`
 	TasksMax    *int    `json:"tasks_max"`
+	Port        *int    `json:"port"`
 }
 
 func (s *Service) UpdateTenant(ctx context.Context, id int64, in UpdateTenantInput, ac AuditContext) (*domain.Tenant, error) {
@@ -388,6 +389,66 @@ func (s *Service) UpdateTenant(ctx context.Context, id int64, in UpdateTenantInp
 	}
 	unlock := s.lockTenant(t.Username)
 	defer unlock()
+	if t.Status == domain.StatusCreating || t.Status == domain.StatusDeleting {
+		return nil, errors.New("实例正在创建或删除，请稍后再修改")
+	}
+
+	oldPort := t.Port
+	oldCPUQuota, oldMemoryMax, oldTasksMax := t.CPUQuota, t.MemoryMax, t.TasksMax
+	if err := s.applyTenantChanges(t, in); err != nil {
+		return nil, err
+	}
+	portChanged := t.Port != oldPort
+	// Only a port or a resource limit ends up in the systemd unit. A display
+	// name or note change must not bounce the instance.
+	unitChanged := portChanged || t.CPUQuota != oldCPUQuota ||
+		t.MemoryMax != oldMemoryMax || t.TasksMax != oldTasksMax
+	if portChanged {
+		if err := s.applyPortChange(t, oldPort); err != nil {
+			return nil, err
+		}
+	}
+	if unitChanged {
+		if err := s.applyUnitChange(ctx, t, portChanged, ac); err != nil {
+			return t, err
+		}
+	}
+	t.LastError = ""
+	_ = s.Store.UpdateTenant(t)
+	s.Audit(ac, auditTenantUpdate, t, updateAuditDetail(t, oldPort, portChanged), nil)
+	return t, nil
+}
+
+// applyUnitChange rewrites the systemd unit and, when the instance is running
+// (or was down and the port just changed), restarts it and waits for health.
+func (s *Service) applyUnitChange(ctx context.Context, t *domain.Tenant, portChanged bool, ac AuditContext) error {
+	if err := s.writeUnit(ctx, t); err != nil {
+		return err
+	}
+	if err := s.reloadUnits(ctx); err != nil {
+		return err
+	}
+	// A running instance has to restart to bind the new port. An errored one
+	// is also restarted on a port change: the most common reason to change the
+	// port is that the old one did not work, so leaving it down helps nobody.
+	if t.Status == domain.StatusRunning || (portChanged && t.Status == domain.StatusError) {
+		return s.restartAfterUpdate(ctx, t, ac)
+	}
+	return nil
+}
+
+// applyTenantChanges copies the editable fields onto t and validates them. It
+// changes nothing outside the in-memory record.
+func (s *Service) applyTenantChanges(t *domain.Tenant, in UpdateTenantInput) error {
+	if in.Port != nil {
+		if t.Status == domain.StatusTrashed {
+			return errors.New("回收站里的租户不能修改端口")
+		}
+		if err := s.checkPortChange(t, *in.Port); err != nil {
+			return err
+		}
+		t.Port = *in.Port
+	}
 	if in.DisplayName != nil {
 		t.DisplayName = strings.TrimSpace(*in.DisplayName)
 	}
@@ -396,46 +457,94 @@ func (s *Service) UpdateTenant(ctx context.Context, id int64, in UpdateTenantInp
 	}
 	if in.CPUQuota != nil {
 		if !cpuQuotaRe.MatchString(*in.CPUQuota) {
-			return nil, errors.New("CPU 上限格式不对，例如 200%")
+			return errors.New("CPU 上限格式不对，例如 200%")
 		}
 		t.CPUQuota = *in.CPUQuota
 	}
 	if in.MemoryMax != nil {
 		if !memoryMaxRe.MatchString(*in.MemoryMax) {
-			return nil, errors.New("内存上限格式不对，例如 4G")
+			return errors.New("内存上限格式不对，例如 4G")
 		}
 		t.MemoryMax = *in.MemoryMax
 	}
 	if in.TasksMax != nil {
 		if *in.TasksMax < 1 {
-			return nil, errors.New("进程数上限必须大于 0")
+			return errors.New("进程数上限必须大于 0")
 		}
 		t.TasksMax = *in.TasksMax
 	}
-	if err := s.writeUnit(ctx, t); err != nil {
-		return nil, err
+	return nil
+}
+
+func (s *Service) restartAfterUpdate(ctx context.Context, t *domain.Tenant, ac AuditContext) error {
+	if err := s.Sys.Restart(ctx, t.UnitName); err != nil {
+		_ = s.failTenant(t, auditTenantUpdate, "修改后重启失败", err, ac)
+		return err
 	}
-	if err := s.reloadUnits(ctx); err != nil {
-		return nil, err
+	info, err := s.waitHealthy(ctx, t.Port, "", 45*time.Second)
+	if err != nil {
+		_ = s.failTenant(t, auditTenantUpdate, "修改后健康检查失败", err, ac)
+		return err
 	}
-	if t.Status == domain.StatusRunning {
-		if err := s.Sys.Restart(ctx, t.UnitName); err != nil {
-			_ = s.failTenant(t, "tenant.update", "修改配额后重启失败", err, ac)
-			return t, err
-		}
-		info, err := s.waitHealthy(ctx, t.Port, "", 45*time.Second)
-		if err != nil {
-			_ = s.failTenant(t, "tenant.update", "修改配额后健康检查失败", err, ac)
-			return t, err
-		}
-		t.Version = info.Version
-	}
-	t.LastError = ""
-	_ = s.Store.UpdateTenant(t)
-	s.Audit(ac, "tenant.update", t, map[string]any{
+	t.Version = info.Version
+	return nil
+}
+
+func updateAuditDetail(t *domain.Tenant, oldPort int, portChanged bool) map[string]any {
+	detail := map[string]any{
 		"cpu_quota": t.CPUQuota, "memory_max": t.MemoryMax, "tasks_max": t.TasksMax,
-	}, nil)
-	return t, nil
+	}
+	if portChanged {
+		detail["old_port"] = oldPort
+		detail[fieldPort] = t.Port
+	}
+	return detail
+}
+
+// checkPortChange validates a new main port without touching anything. A port
+// outside the configured range has no row in the ports table and is allowed,
+// the same way adoption claims such a port.
+func (s *Service) checkPortChange(t *domain.Tenant, port int) error {
+	if port < 1 || port > 65535 {
+		return errors.New("端口必须是 1-65535 之间的整数")
+	}
+	if port == t.Port {
+		return nil
+	}
+	state, err := s.Store.PortState(port)
+	switch {
+	case err == nil && state != "free":
+		return fmt.Errorf("端口 %d 已经被占用（其他租户或本实例的转发端口），请换一个", port)
+	case err != nil && !errors.Is(err, store.ErrNotFound):
+		return err
+	}
+	if portListening(port) {
+		return fmt.Errorf("端口 %d 已经被本机其他程序占用，请换一个", port)
+	}
+	return nil
+}
+
+// applyPortChange moves the port in the database and rewrites the instance
+// config. The caller has already validated the port and put it in t.Port.
+func (s *Service) applyPortChange(t *domain.Tenant, oldPort int) error {
+	newPort := t.Port
+	if err := s.Store.ChangePort(t.ID, oldPort, newPort); err != nil {
+		return err
+	}
+	if err := s.Store.UpdateTenant(t); err != nil {
+		_ = s.Store.ChangePort(t.ID, newPort, oldPort)
+		t.Port = oldPort
+		return err
+	}
+	if err := s.writeTenantConfig(t, ""); err != nil {
+		// The config file is written through a temp file, so a failure leaves
+		// the old one intact; put the port bookkeeping back as well.
+		_ = s.Store.ChangePort(t.ID, newPort, oldPort)
+		t.Port = oldPort
+		_ = s.Store.UpdateTenant(t)
+		return fmt.Errorf("写租户配置失败：%w", err)
+	}
+	return nil
 }
 
 func (s *Service) Logs(ctx context.Context, id int64, lines int, ac AuditContext) (string, error) {
@@ -955,7 +1064,7 @@ func (s *Service) runBulk(ctx context.Context, jobID int64, action string, ids, 
 		_ = s.Store.UpdateJobItem(itemIDs[i], status, errText)
 		_ = s.Store.UpdateJobProgress(jobID, done, failed)
 	}
-	result, _ := json.Marshal(map[string]any{"done": done, statusFailed: failed})
+	result, _ := json.Marshal(map[string]any{fieldDone: done, statusFailed: failed})
 	final := domain.JobSucceeded
 	if failed == done {
 		final = domain.JobFailed
@@ -1069,7 +1178,7 @@ func (s *Service) runImport(ctx context.Context, jobID int64, rows []ImportRow, 
 	s.setArtifact(jobID, "success.csv", success.Bytes())
 	s.setArtifact(jobID, "failures.csv", failures.Bytes())
 
-	result, _ := json.Marshal(map[string]any{"done": done, statusFailed: failed})
+	result, _ := json.Marshal(map[string]any{fieldDone: done, statusFailed: failed})
 	final := domain.JobSucceeded
 	if failed == done {
 		final = domain.JobFailed

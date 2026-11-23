@@ -563,8 +563,8 @@ func TestFailedHealthRollsBackUpdate(t *testing.T) {
 	if err := svc.Sys.WriteUnit(ctx, alice.UnitName, unit); err != nil {
 		t.Fatal(err)
 	}
-	name := "Alice"
-	if _, err := svc.UpdateTenant(ctx, alice.ID, UpdateTenantInput{DisplayName: &name}, AuditContext{}); err == nil {
+	quota := "150%"
+	if _, err := svc.UpdateTenant(ctx, alice.ID, UpdateTenantInput{CPUQuota: &quota}, AuditContext{}); err == nil {
 		// The fake restart may still succeed if Start returns early; in that
 		// case the tenant is still consistent.
 		fresh, _ := svc.GetTenant(alice.ID)

@@ -7,8 +7,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"clawbench-fleet/internal/config"
+	"clawbench-fleet/internal/domain"
 )
 
 // seedExistingInstance creates a Linux account with a Clawbench data directory
@@ -295,5 +297,53 @@ func TestScanPrefersConfigPortOverForwardingPort(t *testing.T) {
 	}
 	if items[0].Port != main {
 		t.Fatalf("port = %d, want the main port %d (forwarding port was %d)", items[0].Port, main, fwd)
+	}
+}
+
+func TestAdoptTenantsAsyncReportsProgress(t *testing.T) {
+	svc, cfg := newTestService(t)
+	port := freePort(t)
+	seedExistingInstance(t, svc, cfg, "alice", 5001, port)
+
+	job, err := svc.AdoptTenantsAsync(context.Background(), []string{"alice", "ghost"}, AuditContext{Actor: "tester"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Total != 2 {
+		t.Fatalf("job total = %d, want 2", job.Total)
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	var got *domain.Job
+	for {
+		got, err = svc.Job(job.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status == domain.JobSucceeded || got.Status == domain.JobFailed || got.Status == domain.JobPartial {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("adopt job did not finish: %+v", got)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// One account is adopted, the other one does not exist: the job is partial
+	// and the per-account results stay in the order the page sent them.
+	if got.Status != domain.JobPartial {
+		t.Fatalf("job status = %q, want partial (%+v)", got.Status, got)
+	}
+	if len(got.Items) != 2 {
+		t.Fatalf("job items = %+v", got.Items)
+	}
+	if got.Items[0].Name != "alice" || got.Items[0].Status != domain.JobSucceeded || got.Items[0].Error != "" {
+		t.Fatalf("alice item = %+v", got.Items[0])
+	}
+	if got.Items[1].Name != "ghost" || got.Items[1].Status != domain.JobFailed || got.Items[1].Error == "" {
+		t.Fatalf("ghost item = %+v", got.Items[1])
+	}
+	if _, err := svc.Store.GetTenantByUsername("alice"); err != nil {
+		t.Fatalf("alice was not adopted: %v", err)
 	}
 }

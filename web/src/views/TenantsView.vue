@@ -17,7 +17,7 @@ import EmptyState from '../components/EmptyState.vue'
 import Modal from '../components/Modal.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import { toast } from '../stores/toast'
-import type { AdoptCandidate, AdoptResult, Job, Page, Tenant } from '../types'
+import type { AdoptCandidate, Job, Page, Tenant } from '../types'
 import { formatAgo, formatBytes, formatPercent, formatTime } from '../utils'
 
 const items = ref<Tenant[]>([])
@@ -31,14 +31,16 @@ const selected = ref<number[]>([])
 
 const scanOpen = ref(false)
 const scanning = ref(false)
-const adopting = ref(false)
+const adoptStarting = ref(false)
 const candidates = ref<AdoptCandidate[]>([])
 const scanPicked = ref<string[]>([])
 const scanError = ref('')
+const adoptJob = ref<Job | null>(null)
 
 let pollTimer = 0
 let searchTimer = 0
 let jobTimer = 0
+let adoptTimer = 0
 
 async function load(silent = false) {
   if (!silent) loading.value = true
@@ -66,6 +68,7 @@ onBeforeUnmount(() => {
   window.clearInterval(pollTimer)
   window.clearInterval(searchTimer)
   window.clearInterval(jobTimer)
+  window.clearInterval(adoptTimer)
 })
 
 watch([q, status], () => {
@@ -142,6 +145,8 @@ async function openScan() {
   candidates.value = []
   scanPicked.value = []
   scanError.value = ''
+  adoptJob.value = null
+  window.clearInterval(adoptTimer)
   scanning.value = true
   try {
     const res = await api.get<{ items: AdoptCandidate[] }>('/tenants/scan')
@@ -152,6 +157,15 @@ async function openScan() {
   } finally {
     scanning.value = false
   }
+}
+
+function closeScan() {
+  if (adoptRunning.value) {
+    toast('纳入在后台继续，完成后列表会自动刷新', 'info')
+  }
+  window.clearInterval(adoptTimer)
+  scanOpen.value = false
+  adoptJob.value = null
 }
 
 function scanSelectable(c: AdoptCandidate) {
@@ -179,30 +193,79 @@ function toggleScan(username: string) {
 }
 
 async function adoptPicked() {
-  if (!scanPicked.value.length) return
-  adopting.value = true
+  if (!scanPicked.value.length || adoptRunning.value) return
+  adoptStarting.value = true
   try {
-    const res = await api.post<{ items: AdoptResult[] }>('/tenants/adopt', {
+    const res = await api.post<{ job: Job }>('/tenants/adopt', {
       usernames: scanPicked.value,
     })
-    const items = res.items || []
-    const failed = items.filter((r) => r.error)
-    const ok = items.length - failed.length
-    if (failed.length) {
-      toast(
-        `纳入完成：成功 ${ok} 个，失败 ${failed.length} 个（${failed[0].username}：${failed[0].error}）`,
-        'error',
-      )
-    } else {
-      toast(`已纳入 ${ok} 个已有实例`, 'success')
-    }
-    scanOpen.value = false
-    load(true)
+    adoptJob.value = res.job
+    pollAdoptJob()
   } catch (e) {
     toast(errorMessage(e, '纳入失败'), 'error')
   } finally {
-    adopting.value = false
+    adoptStarting.value = false
   }
+}
+
+function pollAdoptJob() {
+  window.clearInterval(adoptTimer)
+  adoptTimer = window.setInterval(async () => {
+    if (!adoptJob.value) return
+    try {
+      const res = await api.get<{ job: Job }>(`/jobs/${adoptJob.value.id}`)
+      adoptJob.value = res.job
+      if (adoptDone.value) {
+        window.clearInterval(adoptTimer)
+        const ok = res.job.done - res.job.failed
+        if (res.job.status === 'succeeded') {
+          toast(`已纳入 ${ok} 个已有实例`, 'success')
+        } else {
+          toast(`纳入结束：成功 ${ok} 个，失败 ${res.job.failed} 个`, 'error')
+        }
+        load(true)
+      }
+    } catch {
+      window.clearInterval(adoptTimer)
+    }
+  }, 800)
+}
+
+const adoptProgress = computed(() => {
+  if (!adoptJob.value || !adoptJob.value.total) return 0
+  return Math.round((adoptJob.value.done / adoptJob.value.total) * 100)
+})
+const adoptDone = computed(
+  () => !!adoptJob.value && ['succeeded', 'failed', 'partial'].includes(adoptJob.value.status),
+)
+const adoptRunning = computed(() => !!adoptJob.value && !adoptDone.value)
+const adoptSummary = computed(() => {
+  if (!adoptJob.value) return ''
+  if (!adoptDone.value) return '纳入中'
+  if (adoptJob.value.status === 'succeeded') return '已完成'
+  if (adoptJob.value.status === 'partial') return '部分失败'
+  return '失败'
+})
+
+function jobItemLabel(status: string) {
+  switch (status) {
+    case 'pending':
+      return '排队中'
+    case 'running':
+      return '处理中'
+    case 'succeeded':
+      return '已纳入'
+    case 'failed':
+      return '失败'
+    default:
+      return status
+  }
+}
+
+function jobItemBadge(status: string) {
+  if (status === 'succeeded') return 'badge-ok'
+  if (status === 'failed') return 'badge-failed'
+  return 'badge-neutral'
 }
 
 function scanStatus(c: AdoptCandidate) {
@@ -337,12 +400,47 @@ function scanStatus(c: AdoptCandidate) {
       </div>
     </div>
 
-    <Modal v-if="scanOpen" title="扫描机器上已有的实例" wide @close="scanOpen = false">
+    <Modal v-if="scanOpen" title="扫描机器上已有的实例" wide @close="closeScan">
       <p class="muted small" style="margin-top: 0">
-        平台会检查本机每个用户的家目录，发现 Clawbench 数据目录的账号就列出来。勾选后会把它的服务改成平台统一管理，会重启一次、中断几秒；员工原来的密码不变。
+        平台会检查本机每个用户的家目录，发现 Clawbench 数据目录的账号就列出来。勾选后会把它的服务改成平台统一管理，会重启一次、中断几秒；员工原来的密码不变。多个账号会并行处理（最多 3 个），下面能看到每一个的进度。
       </p>
       <div v-if="scanning" class="muted" style="padding: 20px 0">正在扫描…</div>
       <div v-else-if="scanError" class="muted" style="padding: 20px 0">{{ scanError }}</div>
+      <div v-else-if="adoptJob">
+        <div class="row-between" style="margin-bottom: 10px; flex-wrap: wrap; gap: 8px">
+          <span class="small muted-2">
+            {{ adoptJob.done }} / {{ adoptJob.total }}
+            <span v-if="adoptJob.failed" style="color: var(--red)"> · 失败 {{ adoptJob.failed }}</span>
+          </span>
+          <span
+            class="badge"
+            :class="adoptDone ? (adoptJob.status === 'succeeded' ? 'badge-ok' : adoptJob.status === 'partial' ? 'badge-neutral' : 'badge-failed') : 'badge-neutral'"
+          >
+            {{ adoptSummary }}
+          </span>
+        </div>
+        <div class="progress" style="margin-bottom: 14px"><span :style="{ width: adoptProgress + '%' }" /></div>
+        <div class="table-wrap" style="max-height: 46vh; overflow: auto">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>用户</th>
+                <th>状态</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="item in adoptJob.items || []" :key="item.id">
+                <td class="mono small">{{ item.name }}</td>
+                <td>
+                  <span class="badge" :class="jobItemBadge(item.status)">{{ jobItemLabel(item.status) }}</span>
+                </td>
+                <td class="small" :style="item.error ? 'color: var(--red)' : ''">{{ item.error || '—' }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
       <div v-else class="table-wrap" style="max-height: 52vh; overflow: auto">
         <table class="table">
           <thead>
@@ -389,11 +487,23 @@ function scanStatus(c: AdoptCandidate) {
         </table>
       </div>
       <template #footer>
-        <button class="btn" type="button" @click="scanOpen = false">取消</button>
-        <button class="btn" type="button" :disabled="scanning || adopting" @click="openScan">重新扫描</button>
-        <button class="btn btn-primary" type="button" :disabled="adopting || !scanPicked.length" @click="adoptPicked">
-          {{ adopting ? '纳入中…' : `纳入所选（${scanPicked.length}）` }}
+        <button v-if="!adoptJob" class="btn" type="button" @click="closeScan">取消</button>
+        <button v-if="!adoptJob" class="btn" type="button" :disabled="scanning || adoptStarting" @click="openScan">
+          重新扫描
         </button>
+        <button
+          v-if="!adoptJob"
+          class="btn btn-primary"
+          type="button"
+          :disabled="adoptStarting || !scanPicked.length"
+          @click="adoptPicked"
+        >
+          {{ adoptStarting ? '开始中…' : `纳入所选（${scanPicked.length}）` }}
+        </button>
+        <button v-if="adoptRunning" class="btn btn-primary" type="button" disabled>
+          纳入中… {{ adoptJob?.done }}/{{ adoptJob?.total }}
+        </button>
+        <button v-if="adoptDone" class="btn btn-primary" type="button" @click="closeScan">关闭</button>
       </template>
     </Modal>
   </div>

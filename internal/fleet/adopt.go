@@ -2,6 +2,7 @@ package fleet
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -17,6 +18,11 @@ import (
 	"clawbench-fleet/internal/domain"
 	"clawbench-fleet/internal/sysops"
 )
+
+// adoptWorkers caps how many accounts are taken over at once. Each adoption
+// restarts a service and waits for its health check, so this is the knob that
+// keeps a large batch from hammering the machine.
+const adoptWorkers = 3
 
 // AdoptCandidate is one local account that looks like a Clawbench instance the
 // platform does not know about yet.
@@ -91,29 +97,149 @@ func (s *Service) ScanAdoptable(ctx context.Context) ([]AdoptCandidate, error) {
 	return cands, nil
 }
 
-// AdoptTenants registers existing instances as tenants. Each account is
-// inspected again so the client cannot inject a username that was not scanned.
+// AdoptTenants registers existing instances as tenants and waits for every
+// account to finish. The HTTP layer uses AdoptTenantsAsync instead so the page
+// gets progress while a large batch is being taken over.
 func (s *Service) AdoptTenants(ctx context.Context, usernames []string, ac AuditContext) ([]AdoptResult, error) {
+	names := normalizeAdoptNames(usernames)
+	if len(names) == 0 {
+		return nil, errors.New("没有选中要纳入的账号")
+	}
+	env, err := s.loadScanEnv(ctx)
+	if err != nil {
+		return nil, err
+	}
+	results := s.adoptAll(ctx, env, names, ac, nil)
+	s.auditAdoption(ac, results)
+	return results, nil
+}
+
+// AdoptTenantsAsync creates a job and returns immediately. Each account is a
+// job item, so the page can show which one is being taken over right now.
+func (s *Service) AdoptTenantsAsync(ctx context.Context, usernames []string, ac AuditContext) (*domain.Job, error) {
+	names := normalizeAdoptNames(usernames)
+	if len(names) == 0 {
+		return nil, errors.New("没有选中要纳入的账号")
+	}
+	payload, _ := json.Marshal(map[string]any{"usernames": names})
+	job, err := s.Store.CreateJob("adopt", string(payload), len(names))
+	if err != nil {
+		return nil, err
+	}
+	itemIDs := make([]int64, 0, len(names))
+	for _, name := range names {
+		itemID, err := s.Store.AddJobItem(job.ID, 0, name)
+		if err != nil {
+			return nil, err
+		}
+		itemIDs = append(itemIDs, itemID)
+	}
+	go s.runAdopt(context.WithoutCancel(ctx), job.ID, names, itemIDs, ac)
+	return job, nil
+}
+
+func normalizeAdoptNames(usernames []string) []string {
 	names := make([]string, 0, len(usernames))
 	for _, name := range usernames {
 		if name = strings.TrimSpace(name); name != "" {
 			names = append(names, name)
 		}
 	}
-	if len(names) == 0 {
-		return nil, errors.New("没有选中要纳入的账号")
+	return names
+}
+
+// adoptProgress is the optional job bookkeeping for the async path.
+type adoptProgress struct {
+	jobID   int64
+	itemIDs []int64
+}
+
+// adoptAll inspects and adopts every account with a small worker pool. The
+// scan environment is loaded once: re-reading the whole machine for each
+// account was the slowest part of a batch.
+func (s *Service) adoptAll(ctx context.Context, env *scanEnv, names []string, ac AuditContext, prog *adoptProgress) []AdoptResult {
+	results := make([]AdoptResult, len(names))
+	var mu sync.Mutex
+	done, failed := 0, 0
+	sem := make(chan struct{}, adoptWorkers)
+	var wg sync.WaitGroup
+	for i, name := range names {
+		wg.Add(1)
+		go func(i int, name string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			if prog != nil {
+				_ = s.Store.UpdateJobItem(prog.itemIDs[i], domain.JobRunning, "")
+			}
+			res := s.adoptOne(ctx, env, name, ac)
+			status := domain.JobSucceeded
+			if res.Error != "" {
+				status = domain.JobFailed
+			}
+			if prog != nil {
+				_ = s.Store.UpdateJobItem(prog.itemIDs[i], status, res.Error)
+			}
+
+			mu.Lock()
+			results[i] = res
+			done++
+			if res.Error != "" {
+				failed++
+			}
+			// Update the counter under the lock so two workers cannot write an
+			// older value after a newer one and make the bar jump backwards.
+			if prog != nil {
+				_ = s.Store.UpdateJobProgress(prog.jobID, done, failed)
+			}
+			mu.Unlock()
+		}(i, name)
 	}
-	results := make([]AdoptResult, 0, len(names))
+	wg.Wait()
+	return results
+}
+
+func (s *Service) runAdopt(ctx context.Context, jobID int64, names []string, itemIDs []int64, ac AuditContext) {
+	_ = s.Store.MarkJobRunning(jobID)
+	env, err := s.loadScanEnv(ctx)
+	if err != nil {
+		for _, itemID := range itemIDs {
+			_ = s.Store.UpdateJobItem(itemID, domain.JobFailed, err.Error())
+		}
+		result, _ := json.Marshal(map[string]any{fieldDone: 0, statusFailed: len(names), "error": err.Error()})
+		_ = s.Store.FinishJob(jobID, domain.JobFailed, string(result))
+		return
+	}
+	results := s.adoptAll(ctx, env, names, ac, &adoptProgress{jobID: jobID, itemIDs: itemIDs})
+	s.auditAdoption(ac, results)
+
+	adopted, failed := 0, 0
+	for _, r := range results {
+		if r.Error == "" {
+			adopted++
+		} else {
+			failed++
+		}
+	}
+	result, _ := json.Marshal(map[string]any{fieldDone: len(results), statusFailed: failed, "adopted": adopted})
+	final := domain.JobSucceeded
+	if failed == len(results) {
+		final = domain.JobFailed
+	} else if failed > 0 {
+		final = domain.JobPartial
+	}
+	_ = s.Store.FinishJob(jobID, final, string(result))
+}
+
+func (s *Service) auditAdoption(ac AuditContext, results []AdoptResult) {
 	adopted := 0
-	for _, name := range names {
-		res := s.adoptOne(ctx, name, ac)
-		if res.Error == "" {
+	for _, r := range results {
+		if r.Error == "" {
 			adopted++
 		}
-		results = append(results, res)
 	}
 	s.Audit(ac, "tenant.adopt", nil, map[string]any{"total": len(results), "adopted": adopted}, nil)
-	return results, nil
 }
 
 func (s *Service) loadScanEnv(ctx context.Context) (*scanEnv, error) {
@@ -452,18 +578,15 @@ func dataDirFromCmd(command string) string {
 	return ""
 }
 
-func (s *Service) adoptOne(ctx context.Context, username string, ac AuditContext) AdoptResult {
+// adoptOne re-inspects one account so a client cannot adopt a username that
+// was never scanned, then takes its service over.
+func (s *Service) adoptOne(ctx context.Context, env *scanEnv, username string, ac AuditContext) AdoptResult {
 	res := AdoptResult{Username: username}
 	unlock := s.lockTenant(username)
 	defer unlock()
 
 	if _, err := s.Store.GetTenantByUsername(username); err == nil {
 		res.Error = "已经在管理列表里"
-		return res
-	}
-	env, envErr := s.loadScanEnv(ctx)
-	if envErr != nil {
-		res.Error = envErr.Error()
 		return res
 	}
 	c, blocked := s.findCandidate(ctx, env, username)

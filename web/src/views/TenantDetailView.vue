@@ -48,6 +48,12 @@ const removeBackupTarget = ref<Backup | null>(null)
 const trashed = computed(() => tenant.value?.status === 'trashed')
 
 const quota = ref({ cpu_quota: '', memory_max: '', tasks_max: 0 })
+const portOpen = ref(false)
+const portDraft = ref(0)
+const portError = ref('')
+const profileOpen = ref(false)
+const profileDraft = ref({ display_name: '', notes: '' })
+const profileError = ref('')
 
 let timer = 0
 
@@ -143,6 +149,72 @@ async function saveQuota() {
     toast('资源上限已保存，实例已重启', 'success')
   } catch (e) {
     toast(errorMessage(e, '保存失败'), 'error')
+  } finally {
+    busy.value = ''
+    load(true)
+  }
+}
+
+function openPortEdit() {
+  portDraft.value = tenant.value?.port || 0
+  portError.value = ''
+  portOpen.value = true
+}
+
+function openProfileEdit() {
+  profileDraft.value = {
+    display_name: tenant.value?.display_name || '',
+    notes: tenant.value?.notes || '',
+  }
+  profileError.value = ''
+  profileOpen.value = true
+}
+
+async function saveProfile() {
+  if (!tenant.value) return
+  profileError.value = ''
+  busy.value = 'profile'
+  try {
+    const res = await api.patch<{ tenant: Tenant }>(`/tenants/${id.value}`, {
+      display_name: profileDraft.value.display_name,
+      notes: profileDraft.value.notes,
+    })
+    tenant.value = res.tenant
+    profileOpen.value = false
+    toast('租户资料已保存', 'success')
+  } catch (e) {
+    profileError.value = errorMessage(e, '保存失败')
+  } finally {
+    busy.value = ''
+    load(true)
+  }
+}
+
+async function savePort() {
+  if (!tenant.value) return
+  const port = Number(portDraft.value)
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    portError.value = '端口必须是 1-65535 之间的整数'
+    return
+  }
+  if (port === tenant.value.port) {
+    portError.value = '新端口和当前端口一样'
+    return
+  }
+  portError.value = ''
+  busy.value = 'port'
+  try {
+    const res = await api.patch<{ tenant: Tenant }>(`/tenants/${id.value}`, { port })
+    tenant.value = res.tenant
+    portOpen.value = false
+    toast(
+      res.tenant.status === 'running'
+        ? `端口已改为 ${port}，实例已按新端口重启`
+        : `端口已改为 ${port}，下次启动生效`,
+      'success',
+    )
+  } catch (e) {
+    portError.value = errorMessage(e, '修改端口失败')
   } finally {
     busy.value = ''
     load(true)
@@ -285,9 +357,20 @@ function download(backup: Backup) {
             <h1 class="mono" style="font-size: 22px">{{ tenant.username }}</h1>
             <StatusBadge :status="tenant.status" />
           </div>
-          <div class="muted small" style="margin-top: 3px">
-            {{ tenant.display_name || '未填写显示名' }}
-            <span v-if="tenant.notes"> · {{ tenant.notes }}</span>
+          <div class="row muted small" style="margin-top: 3px; gap: 8px; flex-wrap: wrap">
+            <span>
+              {{ tenant.display_name || '未填写显示名' }}
+              <span v-if="tenant.notes"> · {{ tenant.notes }}</span>
+            </span>
+            <button
+              v-if="!trashed"
+              class="btn btn-ghost btn-sm"
+              type="button"
+              :disabled="!!busy"
+              @click="openProfileEdit"
+            >
+              编辑资料
+            </button>
           </div>
         </div>
 
@@ -358,7 +441,21 @@ function download(backup: Backup) {
       <div class="card">
         <div class="card-header"><div class="card-title">基本信息</div></div>
         <div class="detail-grid">
-          <div class="detail-item"><span class="detail-label">端口</span><span class="detail-value mono">{{ tenant.port }}</span></div>
+          <div class="detail-item">
+            <span class="detail-label">端口</span>
+            <span class="row" style="gap: 8px">
+              <span class="detail-value mono">{{ tenant.port }}</span>
+              <button
+                v-if="!trashed"
+                class="btn btn-ghost btn-sm"
+                type="button"
+                :disabled="!!busy"
+                @click="openPortEdit"
+              >
+                修改
+              </button>
+            </span>
+          </div>
           <div class="detail-item"><span class="detail-label">版本</span><span class="detail-value mono">{{ tenant.version || '—' }}</span></div>
           <div class="detail-item"><span class="detail-label">UID / GID</span><span class="detail-value mono">{{ tenant.uid }} / {{ tenant.gid }}</span></div>
           <div class="detail-item"><span class="detail-label">创建时间</span><span class="detail-value">{{ formatTime(tenant.created_at) }}</span></div>
@@ -521,6 +618,50 @@ function download(backup: Backup) {
     @cancel="removeBackupTarget = null"
     @confirm="doRemoveBackup"
   />
+
+  <Modal v-if="profileOpen" title="编辑租户资料" @close="profileOpen = false">
+    <div class="stack">
+      <div class="field">
+        <label>显示名</label>
+        <input v-model="profileDraft.display_name" class="input" placeholder="例如 张三（研发部）" />
+      </div>
+      <div class="field">
+        <label>备注</label>
+        <input v-model="profileDraft.notes" class="input" placeholder="例如 研发部，工位 A12" />
+      </div>
+    </div>
+    <div v-if="profileError" class="small" style="color: var(--red); margin-top: 8px">{{ profileError }}</div>
+    <template #footer>
+      <button class="btn" type="button" @click="profileOpen = false">取消</button>
+      <button class="btn btn-primary" type="button" :disabled="busy === 'profile'" @click="saveProfile">
+        {{ busy === 'profile' ? '保存中…' : '保存' }}
+      </button>
+    </template>
+  </Modal>
+
+  <Modal v-if="portOpen" title="修改端口" @close="portOpen = false">
+    <p class="muted small" style="margin-top: 0">
+      当前端口是 <span class="mono">{{ tenant?.port }}</span>。改完后平台会重写实例配置和 systemd 单元，运行中的实例会重启一次；员工访问地址会变成新端口，记得通知员工。
+    </p>
+    <div class="field">
+      <label>新端口</label>
+      <input
+        v-model.number="portDraft"
+        class="input mono"
+        type="number"
+        min="1"
+        max="65535"
+        placeholder="例如 21001"
+      />
+    </div>
+    <div v-if="portError" class="small" style="color: var(--red); margin-top: 8px">{{ portError }}</div>
+    <template #footer>
+      <button class="btn" type="button" @click="portOpen = false">取消</button>
+      <button class="btn btn-primary" type="button" :disabled="busy === 'port'" @click="savePort">
+        {{ busy === 'port' ? '保存中…' : '保存修改' }}
+      </button>
+    </template>
+  </Modal>
 
   <Modal v-if="password" :title="passwordTitle" @close="password = ''">
     <CopyField label="新密码" :value="password" />

@@ -70,13 +70,6 @@ export interface AdoptCandidate {
   warnings: string[]
 }
 
-export interface AdoptResult {
-  username: string
-  tenant_id?: number
-  status: string
-  error: string
-}
-
 export interface HostStats {
   cpu_percent: number
   mem_total: number

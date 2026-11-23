@@ -541,6 +541,12 @@ bob,李四,产品部
 
 纳管会短暂中断实例几秒。已经纳管的账号再次扫描会显示“已纳管”。
 
+一次勾选多个账号时，平台最多并行处理 3 个：每个账号是一个后台任务项，页面能实时看到“排队中 / 处理中 / 已纳入 / 失败”和失败原因，不用干等一个长请求。整批只读取一次系统用户、单元和监听端口，不再为每个账号重复扫全机。
+
+**改端口**
+
+已经纳管的实例可以在详情页改主端口。平台会先确认新端口没有被其他租户或本机程序占用，然后在端口表里一次性把旧端口释放、新端口登记到这个租户，再重写 `config.yaml` 和 systemd 单元；运行中的实例会重启一次并按新端口做健康检查。员工访问地址随之变化，需要重新通知员工。
+
 **root 的特殊处理**
 
 - root 有 `.clawbench` 数据目录时同样纳管，家目录按 `/etc/passwd` 的真实值（通常是 `/root`），不是 `/home/root`。
@@ -647,7 +653,7 @@ WantedBy=multi-user.target
 | GET | `/api/tenants` | 列表，支持 `q`、`status`、`page`、`page_size` |
 | POST | `/api/tenants` | 新建，返回租户信息和一次性初始密码 |
 | GET | `/api/tenants/{id}` | 详情 |
-| PATCH | `/api/tenants/{id}` | 改显示名、备注、配额 |
+| PATCH | `/api/tenants/{id}` | 改显示名、备注、配额、端口；只有配额或端口变化才会重写单元并重启 |
 | DELETE | `/api/tenants/{id}` | 删除到回收站，要求 body 里带登录名确认 |
 | POST | `/api/tenants/{id}/start` | 启动 |
 | POST | `/api/tenants/{id}/stop` | 停止 |
@@ -658,7 +664,7 @@ WantedBy=multi-user.target
 | POST | `/api/tenants/{id}/repair` | 重写配置和 systemd 单元并重启 |
 | POST | `/api/tenants/bulk` | 批量操作，body：`{action, ids}` |
 | GET | `/api/tenants/scan` | 扫描本机已有实例，返回可纳管的账号列表，不落库 |
-| POST | `/api/tenants/adopt` | 纳管已有实例，body：`{usernames: []}`，返回逐个结果 |
+| POST | `/api/tenants/adopt` | 纳管已有实例，body：`{usernames: []}`，返回后台任务，按任务项查看逐个结果 |
 | POST | `/api/tenants/import/preview` | 上传 CSV 预览，不落库 |
 | POST | `/api/tenants/import` | 开始导入，返回任务 ID |
 
