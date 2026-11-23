@@ -492,7 +492,7 @@ func (s *Service) restartAfterUpdate(ctx context.Context, t *domain.Tenant, ac A
 
 func updateAuditDetail(t *domain.Tenant, oldPort int, portChanged bool) map[string]any {
 	detail := map[string]any{
-		"cpu_quota": t.CPUQuota, "memory_max": t.MemoryMax, "tasks_max": t.TasksMax,
+		fieldCPUQuota: t.CPUQuota, fieldMemoryMax: t.MemoryMax, fieldTasksMax: t.TasksMax,
 	}
 	if portChanged {
 		detail["old_port"] = oldPort

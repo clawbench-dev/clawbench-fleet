@@ -104,6 +104,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/audit", s.protected(s.handleAudit))
 	s.mux.HandleFunc("GET /api/settings", s.protected(s.handleGetSettings))
 	s.mux.HandleFunc("PATCH /api/settings", s.protected(s.handleUpdateSettings))
+	s.mux.HandleFunc("POST /api/settings/apply-quota", s.protected(s.handleApplyDefaultQuota))
 
 	s.mux.HandleFunc("/", s.serveStatic)
 }

@@ -447,6 +447,72 @@ func TestCSVImport(t *testing.T) {
 	}
 }
 
+func TestApplyDefaultQuotaEndpoint(t *testing.T) {
+	c, _ := newTestClient(t)
+	created := createTenant(t, c, "alice")
+	id := tenantID(t, created)
+	waitForStatus(t, c, id)
+
+	var settings struct {
+		Settings map[string]any `json:"settings"`
+	}
+	if status := c.json(http.MethodGet, "/api/settings", nil, &settings); status != http.StatusOK {
+		t.Fatalf("get settings = %d", status)
+	}
+	next := settings.Settings
+	next["default_cpu_quota"] = "300%"
+	next["default_memory_max"] = "8G"
+	next["default_tasks_max"] = 1024
+	if status := c.json(http.MethodPatch, "/api/settings", next, nil); status != http.StatusOK {
+		t.Fatalf("update settings = %d", status)
+	}
+
+	var started struct {
+		Job domain.Job `json:"job"`
+	}
+	if status := c.json(http.MethodPost, "/api/settings/apply-quota", nil, &started); status != http.StatusAccepted {
+		t.Fatalf("apply quota = %d %+v", status, started)
+	}
+	if started.Job.Total != 1 {
+		t.Fatalf("job total = %d, want 1", started.Job.Total)
+	}
+
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		var got struct {
+			Job domain.Job `json:"job"`
+		}
+		if status := c.json(http.MethodGet, "/api/jobs/"+itoa(started.Job.ID), nil, &got); status != http.StatusOK {
+			t.Fatalf("get job = %d", status)
+		}
+		if got.Job.Status == domain.JobSucceeded || got.Job.Status == domain.JobFailed || got.Job.Status == domain.JobPartial {
+			if got.Job.Status != domain.JobSucceeded {
+				t.Fatalf("apply job = %+v", got.Job)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("apply job did not finish: %+v", got.Job)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	var detail struct {
+		Tenant domain.Tenant `json:"tenant"`
+	}
+	if status := c.json(http.MethodGet, "/api/tenants/"+itoa(id), nil, &detail); status != http.StatusOK {
+		t.Fatalf("tenant detail = %d", status)
+	}
+	if detail.Tenant.CPUQuota != "300%" || detail.Tenant.MemoryMax != "8G" || detail.Tenant.TasksMax != 1024 {
+		t.Fatalf("tenant quota = %+v", detail.Tenant)
+	}
+
+	// Once every instance matches, there is nothing to apply.
+	if status := c.json(http.MethodPost, "/api/settings/apply-quota", nil, nil); status != http.StatusBadRequest {
+		t.Fatalf("second apply = %d, want 400", status)
+	}
+}
+
 func TestStaticFallback(t *testing.T) {
 	c, _ := newTestClient(t)
 	req, _ := http.NewRequest(http.MethodGet, c.srv.URL+"/unknown/route", http.NoBody)

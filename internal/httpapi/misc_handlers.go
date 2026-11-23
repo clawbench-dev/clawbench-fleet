@@ -73,6 +73,15 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"settings": s.svc.Settings()})
 }
 
+func (s *Server) handleApplyDefaultQuota(w http.ResponseWriter, r *http.Request) {
+	job, err := s.svc.ApplyDefaultQuotaAsync(r.Context(), auditCtx(r))
+	if err != nil {
+		writeServiceErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{fieldJob: job})
+}
+
 func (s *Server) serveStatic(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(r.URL.Path, "/api/") {
 		writeErr(w, http.StatusNotFound, "not_found", "接口不存在")

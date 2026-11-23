@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { KeyRound, Save, Server, ShieldCheck } from 'lucide-vue-next'
 import { api, errorMessage } from '../api'
+import Modal from '../components/Modal.vue'
 import { auth } from '../stores/auth'
 import { toast } from '../stores/toast'
-import type { Settings } from '../types'
+import type { Job, Settings } from '../types'
 
 const router = useRouter()
 const settings = ref<Settings | null>(null)
@@ -45,20 +46,135 @@ async function load() {
   }
 }
 
-onMounted(load)
+const applyOpen = ref(false)
+const applyStarting = ref(false)
+const applyError = ref('')
+const applyJob = ref<Job | null>(null)
+let applyTimer = 0
 
-async function save() {
-  if (!settings.value) return
+onMounted(load)
+onBeforeUnmount(() => window.clearInterval(applyTimer))
+
+// persist saves the form and returns an error message, or '' on success. The
+// save button shows a toast; the apply flow shows the message inside its modal
+// instead, so a validation error does not disappear behind a popup.
+async function persist(): Promise<string> {
+  if (!settings.value) return '设置还没有加载完'
   saving.value = true
   try {
     const res = await api.patch<{ settings: Settings }>('/settings', settings.value)
     settings.value = res.settings
-    toast('设置已保存', 'success')
+    return ''
   } catch (e) {
-    toast(errorMessage(e, '保存失败'), 'error')
+    return errorMessage(e, '保存失败')
   } finally {
     saving.value = false
   }
+}
+
+async function save() {
+  const err = await persist()
+  if (err) {
+    toast(err, 'error')
+    return
+  }
+  toast('设置已保存', 'success')
+}
+
+function openApply() {
+  // A running job keeps going in the background; reopening the dialog shows
+  // its live progress instead of starting a second push.
+  if (applyJob.value && !applyDone.value) {
+    applyOpen.value = true
+    return
+  }
+  applyError.value = ''
+  applyJob.value = null
+  applyOpen.value = true
+}
+
+function closeApply() {
+  // Closing only hides the dialog: the server-side job keeps running and the
+  // poll below still updates the button state and reports the result.
+  applyOpen.value = false
+}
+
+async function startApply() {
+  applyError.value = ''
+  applyStarting.value = true
+  try {
+    const saveErr = await persist()
+    if (saveErr) {
+      applyError.value = saveErr
+      return
+    }
+    const res = await api.post<{ job: Job }>('/settings/apply-quota')
+    applyJob.value = res.job
+    pollApply()
+  } catch (e) {
+    applyError.value = errorMessage(e, '应用失败')
+  } finally {
+    applyStarting.value = false
+  }
+}
+
+function pollApply() {
+  window.clearInterval(applyTimer)
+  applyTimer = window.setInterval(async () => {
+    if (!applyJob.value) return
+    try {
+      const res = await api.get<{ job: Job }>(`/jobs/${applyJob.value.id}`)
+      applyJob.value = res.job
+      if (applyDone.value) {
+        window.clearInterval(applyTimer)
+        const ok = res.job.done - res.job.failed
+        if (res.job.status === 'succeeded') {
+          toast(`已应用到 ${ok} 个实例`, 'success')
+        } else {
+          toast(`应用结束：成功 ${ok} 个，失败 ${res.job.failed} 个`, 'error')
+        }
+      }
+    } catch {
+      window.clearInterval(applyTimer)
+    }
+  }, 1000)
+}
+
+const applyProgress = computed(() => {
+  if (!applyJob.value || !applyJob.value.total) return 0
+  return Math.round((applyJob.value.done / applyJob.value.total) * 100)
+})
+const applyDone = computed(
+  () => !!applyJob.value && ['succeeded', 'failed', 'partial'].includes(applyJob.value.status),
+)
+const applyRunning = computed(() => !!applyJob.value && !applyDone.value)
+const applySummary = computed(() => {
+  if (!applyJob.value) return ''
+  if (!applyDone.value) return '应用中'
+  if (applyJob.value.status === 'succeeded') return '已完成'
+  if (applyJob.value.status === 'partial') return '部分失败'
+  return '失败'
+})
+
+function applyItemLabel(status: string) {
+  switch (status) {
+    case 'pending':
+      return '排队中'
+    case 'running':
+      return '处理中'
+    case 'succeeded':
+      return '已应用'
+    case 'failed':
+      return '失败'
+    default:
+      return status
+  }
+}
+
+function applyItemBadge(status: string) {
+  if (status === 'succeeded') return 'badge-ok'
+  if (status === 'failed') return 'badge-failed'
+  return 'badge-neutral'
 }
 
 async function changePassword() {
@@ -108,6 +224,14 @@ async function changePassword() {
             <div class="card-title">默认资源上限</div>
             <div class="card-sub">新建租户时如果没单独填，就用这里的值</div>
           </div>
+          <button
+            class="btn btn-sm"
+            type="button"
+            :disabled="saving"
+            @click="openApply"
+          >
+            {{ applyRunning ? `应用中 ${applyJob?.done}/${applyJob?.total}` : '应用到所有实例' }}
+          </button>
         </div>
         <div class="form-grid">
           <div class="field"><label>CPU 上限</label><input v-model="settings.default_cpu_quota" class="input mono" placeholder="200%" /></div>
@@ -117,6 +241,9 @@ async function changePassword() {
             <label>磁盘提醒阈值（GB，0=关闭）</label>
             <input v-model.number="settings.disk_warn_gb" class="input mono" type="number" min="0" />
           </div>
+        </div>
+        <div class="small muted-2" style="margin-top: 10px">
+          保存后只影响新租户；要让已有实例也用上，点右上角“应用到所有实例”。
         </div>
       </div>
     </div>
@@ -255,5 +382,72 @@ async function changePassword() {
         </div>
       </div>
     </div>
+
+    <Modal v-if="applyOpen" :title="applyJob ? '应用到所有实例' : '把默认资源上限应用到所有实例'" wide @close="closeApply">
+      <template v-if="!applyJob">
+        <p class="muted small" style="margin-top: 0">
+          平台会先保存上面的设置，再把下面这组默认值推送给所有实例（回收站里的除外）。
+        </p>
+        <div class="detail-grid" style="margin-bottom: 12px">
+          <div class="detail-item"><span class="detail-label">CPU 上限</span><span class="detail-value mono">{{ settings?.default_cpu_quota }}</span></div>
+          <div class="detail-item"><span class="detail-label">内存上限</span><span class="detail-value mono">{{ settings?.default_memory_max }}</span></div>
+          <div class="detail-item"><span class="detail-label">进程数上限</span><span class="detail-value mono">{{ settings?.default_tasks_max }}</span></div>
+        </div>
+        <ul class="small muted" style="margin: 0; padding-left: 18px; line-height: 1.9">
+          <li>已经单独设置过配额的实例也会被覆盖。</li>
+          <li>运行中的实例会重启一次，短暂中断几秒。</li>
+          <li>已停止或启动失败的实例只改配置，下次启动生效。</li>
+          <li>正在创建或删除的实例会被跳过。</li>
+        </ul>
+        <div v-if="applyError" class="small" style="color: var(--red); margin-top: 10px">{{ applyError }}</div>
+      </template>
+      <template v-else>
+        <div class="row-between" style="margin-bottom: 10px; flex-wrap: wrap; gap: 8px">
+          <span class="small muted-2">
+            {{ applyJob.done }} / {{ applyJob.total }}
+            <span v-if="applyJob.failed" style="color: var(--red)"> · 失败 {{ applyJob.failed }}</span>
+          </span>
+          <span
+            class="badge"
+            :class="applyDone ? (applyJob.status === 'succeeded' ? 'badge-ok' : applyJob.status === 'partial' ? 'badge-neutral' : 'badge-failed') : 'badge-neutral'"
+          >
+            {{ applySummary }}
+          </span>
+        </div>
+        <div class="progress" style="margin-bottom: 14px"><span :style="{ width: applyProgress + '%' }" /></div>
+        <div v-if="!(applyJob.items || []).length" class="muted small" style="padding: 12px 0">正在准备任务…</div>
+        <div v-else class="table-wrap" style="max-height: 46vh; overflow: auto">
+          <table class="table">
+            <thead>
+              <tr><th>实例</th><th>状态</th><th>说明</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="item in applyJob.items || []" :key="item.id">
+                <td class="mono small">{{ item.name }}</td>
+                <td>
+                  <span class="badge" :class="applyItemBadge(item.status)">{{ applyItemLabel(item.status) }}</span>
+                </td>
+                <td class="small" :style="item.error ? 'color: var(--red)' : ''">{{ item.error || '—' }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div v-if="applyRunning" class="small muted-2" style="margin-top: 10px">
+          可以关掉这个窗口，任务会在后台继续，完成后会提示。
+        </div>
+      </template>
+      <template #footer>
+        <template v-if="!applyJob">
+          <button class="btn" type="button" @click="closeApply">取消</button>
+          <button class="btn btn-primary" type="button" :disabled="applyStarting" @click="startApply">
+            {{ applyStarting ? '提交中…' : '确认应用' }}
+          </button>
+        </template>
+        <template v-else>
+          <button v-if="applyRunning" class="btn" type="button" @click="closeApply">后台继续，关闭</button>
+          <button v-else class="btn btn-primary" type="button" @click="closeApply">关闭</button>
+        </template>
+      </template>
+    </Modal>
   </div>
 </template>
