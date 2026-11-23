@@ -359,7 +359,7 @@ func (s *Service) candidateBlockedReason(c *AdoptCandidate) string {
 	case s.portTaken(c.Port):
 		return fmt.Sprintf("端口 %d 已经被其他租户占用", c.Port)
 	case c.ServiceActive && !c.HealthOK:
-		return fmt.Sprintf("端口 %d 上的实例没响应 HTTP 健康检查（可能启用了 HTTPS 或还没启动完），平台按 HTTP 管理，暂不纳管", c.Port)
+		return fmt.Sprintf("端口 %d 上的程序没响应 Clawbench 健康检查（HTTP 和 HTTPS 都没通，可能还没启动完，也可能不是 Clawbench），暂不纳管", c.Port)
 	case !s.clawbenchBinaryReady():
 		return "平台还没有安装可用的 Clawbench 版本，请先到升级中心安装再纳管"
 	}

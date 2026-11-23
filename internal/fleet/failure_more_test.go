@@ -42,7 +42,7 @@ func TestCandidateBlockedReason(t *testing.T) {
 		{"no port", AdoptCandidate{DataDir: t.TempDir()}, "找不到端口"},
 		{"no config", AdoptCandidate{Port: port, DataDir: t.TempDir()}, "没有 config.yaml"},
 		{"port taken", adoptableCandidate(t, svc, port), "已经被其他租户占用"},
-		{"unhealthy", adoptableCandidate(t, svc, freePort(t)), "没响应 HTTP 健康检查"},
+		{"unhealthy", adoptableCandidate(t, svc, freePort(t)), "没响应 Clawbench 健康检查"},
 	}
 	// Claim the port used by the "port taken" case.
 	if err := svc.Store.ClaimPort(port, 99); err != nil {

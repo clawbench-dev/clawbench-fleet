@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -49,6 +50,11 @@ type Service struct {
 	artifactAt  map[int64]time.Time
 
 	http *http.Client
+	// https is used only after a loopback instance redirects the plain health
+	// check to HTTPS. Instances generate their own certificate, so the chain is
+	// not verifiable; the target is always this machine's loopback address and
+	// the body still has to identify itself as Clawbench.
+	https *http.Client
 	// healthTimeout caps how long an operation waits for an instance to come
 	// up. Production uses the 45–60s defaults at each call site; tests lower
 	// it so failure paths do not sit in a real one-minute wait.
@@ -84,15 +90,23 @@ func New(cfg config.Config, st *store.Store, sys sysops.System) (*Service, error
 		return nil, err
 	}
 	s := &Service{
-		Cfg:           cfg,
-		Store:         st,
-		Sys:           sys,
-		settings:      stg,
-		sem:           make(chan struct{}, 4),
-		metrics:       map[int64]domain.Metrics{},
-		artifacts:     map[int64]map[string][]byte{},
-		artifactAt:    map[int64]time.Time{},
-		http:          &http.Client{Timeout: 3 * time.Second},
+		Cfg:        cfg,
+		Store:      st,
+		Sys:        sys,
+		settings:   stg,
+		sem:        make(chan struct{}, 4),
+		metrics:    map[int64]domain.Metrics{},
+		artifacts:  map[int64]map[string][]byte{},
+		artifactAt: map[int64]time.Time{},
+		http:       &http.Client{Timeout: 3 * time.Second, CheckRedirect: noRedirect},
+		https: &http.Client{
+			Timeout:       3 * time.Second,
+			CheckRedirect: noRedirect,
+			Transport: &http.Transport{
+				//nolint:gosec // the only URL this client sees is loopback https chosen by healthCheck, and the certificate is self-signed by design.
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			},
+		},
 		healthTimeout: 60 * time.Second,
 		lastDaily:     map[string]string{},
 		provisioners:  &provisionTracker{done: map[int64]chan struct{}{}},
@@ -414,16 +428,43 @@ func (s *Service) tenantConfigPath(t *domain.Tenant) string {
 
 // --- health ---
 
+// noRedirect stops the health clients from following redirects on their own:
+// an instance with TLS enabled answers plain http with a 301 to https on the
+// same port, and that hop needs a client that accepts its self-signed
+// certificate.
+func noRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+
+// healthTLSRedirect reports that the instance asked for the health check over
+// HTTPS, carrying the loopback URL to retry.
+type healthTLSRedirect struct{ url string }
+
+func (e *healthTLSRedirect) Error() string { return "health endpoint requires https" }
+
 func (s *Service) healthCheck(ctx context.Context, port int) (*domain.HealthInfo, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/api/health", port), http.NoBody)
+	info, err := s.getHealth(ctx, s.http, fmt.Sprintf("http://127.0.0.1:%d/api/health", port))
+	var redirect *healthTLSRedirect
+	if errors.As(err, &redirect) {
+		return s.getHealth(ctx, s.https, redirect.url)
+	}
+	return info, err
+}
+
+func (s *Service) getHealth(ctx context.Context, client *http.Client, rawURL string) (*domain.HealthInfo, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, http.NoBody)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := s.http.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		if loc, lerr := resp.Location(); lerr == nil && loc.Scheme == "https" && isLoopbackHost(loc.Hostname()) {
+			return nil, &healthTLSRedirect{url: loc.String()}
+		}
+		return nil, fmt.Errorf("health returned HTTP %d", resp.StatusCode)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("health returned HTTP %d", resp.StatusCode)
 	}
@@ -435,6 +476,13 @@ func (s *Service) healthCheck(ctx context.Context, port int) (*domain.HealthInfo
 		return nil, fmt.Errorf("health app is %q, not clawbench", info.App)
 	}
 	return &info, nil
+}
+
+// isLoopbackHost keeps the HTTPS retry on this machine. The redirect comes from
+// the instance itself, so anything else would turn the health check into a
+// request to an address the instance picks.
+func isLoopbackHost(host string) bool {
+	return host == "127.0.0.1" || host == "localhost" || host == "::1"
 }
 
 func (s *Service) waitHealthy(ctx context.Context, port int, wantVersion string, timeout time.Duration) (*domain.HealthInfo, error) {
