@@ -32,6 +32,12 @@ type GuestPage struct {
 }
 
 func (s *Service) GuestPage() (*GuestPage, error) {
+	return s.GuestPageFor("")
+}
+
+// GuestPageFor is GuestPage with the visitor's browser host used to build the
+// instance addresses.
+func (s *Service) GuestPageFor(browserHost string) (*GuestPage, error) {
 	st := s.Settings()
 	page := &GuestPage{
 		Enabled: st.GuestEnabled,
@@ -58,7 +64,7 @@ func (s *Service) GuestPage() (*GuestPage, error) {
 			Username:    t.Username,
 			DisplayName: t.DisplayName,
 			Port:        t.Port,
-			Address:     s.Address(t),
+			Address:     s.AddressFor(t, browserHost),
 			Status:      t.Status,
 			DiskWarn:    diskLimit > 0 && t.DiskBytes >= diskLimit,
 		})

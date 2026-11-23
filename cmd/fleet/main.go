@@ -63,6 +63,13 @@ func run() error {
 	svc.Reconcile(ctx)
 	svc.Run(ctx)
 
+	// Instances are served a self-signed certificate by default. Creating it at
+	// startup means a restarted server never hands out an instance TLS config
+	// that points at nothing.
+	if _, certErr := svc.EnsureCertificate(); certErr != nil {
+		log.Printf("warning: certificate: %v", certErr)
+	}
+
 	api := httpapi.New(svc, cfg)
 	srv := &http.Server{
 		Addr:              cfg.Listen,

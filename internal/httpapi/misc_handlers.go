@@ -7,6 +7,7 @@ import (
 	"path"
 	"strings"
 
+	"clawbench-fleet/internal/domain"
 	"clawbench-fleet/internal/store"
 	"clawbench-fleet/internal/version"
 	"clawbench-fleet/internal/web"
@@ -56,6 +57,8 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		"current_version": currentVersion,
 		"fleet_version":   version.Version,
 		"ssh_status":      sshStatus,
+		"certificate":     s.svc.CertInfo(),
+		"tenant_config":   s.svc.TenantConfig(),
 	})
 }
 
@@ -66,6 +69,12 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.svc.UpdateSettings(next); err != nil {
 		writeServiceErr(w, err)
+		return
+	}
+	// Generate the certificate as soon as HTTPS is turned on, so the first
+	// push has something to hand out.
+	if _, certErr := s.svc.EnsureCertificate(); certErr != nil {
+		writeErr(w, http.StatusInternalServerError, "cert_failed", "设置已保存，但生成证书失败："+certErr.Error())
 		return
 	}
 	s.svc.Audit(auditCtx(r), "settings.update", nil, map[string]any{
@@ -82,6 +91,62 @@ func (s *Server) handleApplyDefaultQuota(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{fieldJob: job})
+}
+
+func (s *Server) handleApplyConfig(w http.ResponseWriter, r *http.Request) {
+	job, err := s.svc.ApplyTenantConfigAsync(r.Context(), auditCtx(r))
+	if err != nil {
+		writeServiceErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{fieldJob: job})
+}
+
+func (s *Server) handleUpdateTenantConfig(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Entries []domain.ConfigEntry `json:"entries"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if err := s.svc.UpdateTenantConfig(body.Entries); err != nil {
+		writeServiceErr(w, err)
+		return
+	}
+	s.svc.Audit(auditCtx(r), "settings.update", nil, map[string]any{
+		"tenant_config": len(body.Entries),
+	}, nil)
+	writeJSON(w, http.StatusOK, map[string]any{"tenant_config": s.svc.TenantConfig()})
+}
+
+func (s *Server) handleCertInfo(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"certificate": s.svc.CertInfo()})
+}
+
+func (s *Server) handleRegenerateCert(w http.ResponseWriter, r *http.Request) {
+	if _, err := s.svc.RegenerateCertificate(); err != nil {
+		writeServiceErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"certificate": s.svc.CertInfo()})
+}
+
+func (s *Server) handleApplyTenantConfig(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_id", err.Error())
+		return
+	}
+	if applyErr := s.svc.ApplyTenantConfigTo(r.Context(), id, auditCtx(r)); applyErr != nil {
+		writeServiceErr(w, applyErr)
+		return
+	}
+	t, err := s.svc.GetTenant(id)
+	if err != nil {
+		writeServiceErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{fieldTenant: s.svc.TenantDTOFor(*t, r.Host)})
 }
 
 func (s *Server) serveStatic(w http.ResponseWriter, r *http.Request) {

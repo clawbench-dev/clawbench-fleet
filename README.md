@@ -42,8 +42,8 @@
                          ├── /opt/clawbench-fleet/versions/<版本>/ + current 软链
                          └── /var/lib/clawbench-fleet/{backups,trash,logs}
 
-员工浏览器 ──HTTP──> IP:21000  clawbench (User=alice, systemd)
-                     IP:21003  clawbench (User=bob,   systemd)
+员工浏览器 ──HTTPS──> IP:21000  clawbench (User=alice, systemd)
+                      IP:21003  clawbench (User=bob,   systemd)
 ```
 
 ---
@@ -102,9 +102,14 @@ sudo ./deploy/install.sh --uninstall     # 停服务、删二进制，数据保�
 - `backup.hour` / `backup.retention_days`、`trash.retention_days`、`audit.retention_days`
 - `clawbench.disk_quota_gb`：新租户默认磁盘上限（GB，0 表示不限制）
 - `ssh.enabled` / `ssh.shell` / `ssh.port`：新建租户默认是否开 SSH、登录 shell、对外展示的 SSH 端口（留 0 则问 sshd）
-- `tls.cert_dir`：填了就启用 HTTPS
+- `tls.cert_dir`：平台管理界面自己的 HTTPS 证书目录（和下面的实例证书无关）
+- `tenant_tls.enabled` / `tenant_tls.cert_dir`：给员工实例统一下发的 HTTPS 证书。默认打开，平台自动生成一份自签证书放在 `<data_dir>/certs`，下发给所有实例共用
 
-界面的「设置」页可以直接改端口段、默认配额、备份和保留策略；**端口和 UID 的改动只影响之后新建的租户**。
+界面的「设置」页可以直接改端口段、默认配额、备份和保留策略；**端口和 UID 的改动只影响之后新建的租户**。同一页还能：
+- 看证书状态、重新生成证书；
+- 维护「统一配置下发」的键值表（例如 `chat.page_size` = `50`），保存后点「下发到所有实例」才写进实例并重启它们。端口、监听地址、密码、证书目录这几项由平台自己维护，不能在这里覆盖。
+
+员工看到的访问地址固定用 `https`；地址里的 IP 优先用设置里填的「对外主机」，留空则跟随管理员当前浏览器访问平台所用的那个地址。
 
 ---
 

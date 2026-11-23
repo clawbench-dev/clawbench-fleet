@@ -177,6 +177,25 @@ export interface Settings {
   guest_notice: string
   guest_help: string
   ssh_enabled: boolean
+  tls_enabled: boolean
+  tls_cert_dir: string
+}
+
+export interface ConfigEntry {
+  key: string
+  value: string
+}
+
+export interface CertificateInfo {
+  enabled: boolean
+  dir: string
+  exists: boolean
+  self_signed: boolean
+  subject: string
+  dns_names: string[]
+  ips: string[]
+  not_before: string
+  not_after: string
 }
 
 export interface SSHStatus {

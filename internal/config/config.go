@@ -22,6 +22,7 @@ type Config struct {
 	Trash     TrashConfig     `yaml:"trash"`
 	Audit     AuditConfig     `yaml:"audit"`
 	TLS       TLSConfig       `yaml:"tls"`
+	TenantTLS TenantTLSConfig `yaml:"tenant_tls"`
 	System    SystemConfig    `yaml:"system"`
 	SSH       SSHConfig       `yaml:"ssh"`
 	Dev       bool            `yaml:"dev"`
@@ -78,6 +79,17 @@ type AuditConfig struct {
 }
 
 type TLSConfig struct {
+	// CertDir is the platform's own HTTPS certificate, serving the admin UI on
+	// the listen address. Unrelated to the certificates shipped to instances.
+	CertDir string `yaml:"cert_dir"`
+}
+
+// TenantTLSConfig controls the certificate the platform hands to every
+// instance. Instances always speak HTTPS once this is on.
+type TenantTLSConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// CertDir holds the shared certificate. Empty means "<data_dir>/certs",
+	// and a self-signed pair is generated there on first start.
 	CertDir string `yaml:"cert_dir"`
 }
 
@@ -105,9 +117,11 @@ func Default() Config {
 			DiskQuotaGB:      0,
 			NpmPackage:       "@xulongzhe/clawbench",
 		},
-		Backup: BackupConfig{Enabled: true, Hour: 3, RetentionDays: 7},
-		Trash:  TrashConfig{RetentionDays: 30},
-		Audit:  AuditConfig{RetentionDays: 180},
+		Backup:    BackupConfig{Enabled: true, Hour: 3, RetentionDays: 7},
+		Trash:     TrashConfig{RetentionDays: 30},
+		Audit:     AuditConfig{RetentionDays: 180},
+		TLS:       TLSConfig{},
+		TenantTLS: TenantTLSConfig{Enabled: true},
 		System: SystemConfig{
 			HomeRoot:   "/home",
 			SystemdDir: "/etc/systemd/system",

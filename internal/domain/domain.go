@@ -57,11 +57,14 @@ type Tenant struct {
 func ProtectedUsername(username string) bool { return username == "root" }
 
 // Address is what the admin copies and sends to the employee.
+// Address builds the URL an employee opens. The instance always speaks HTTPS
+// once the platform ships it a certificate, so the scheme is fixed; only the
+// host varies — see Service.Address.
 func (t Tenant) Address(host string) string {
 	if host == "" {
 		host = "127.0.0.1"
 	}
-	return "http://" + host + ":" + strconv.Itoa(t.Port)
+	return "https://" + host + ":" + strconv.Itoa(t.Port)
 }
 
 type Backup struct {
@@ -178,6 +181,19 @@ type Settings struct {
 	GuestHelp        string `json:"guest_help"`
 	// SSHEnabled is the default applied to newly created tenants.
 	SSHEnabled bool `json:"ssh_enabled"`
+	// TLSEnabled turns HTTPS on for every instance the platform manages.
+	TLSEnabled bool `json:"tls_enabled"`
+	// TLSCertDir is where the shared certificate lives. Empty means
+	// "<data_dir>/certs", and the platform generates a self-signed pair there.
+	TLSCertDir string `json:"tls_cert_dir"`
+}
+
+// ConfigEntry is one key/value pair written into a tenant's config.yaml. Key
+// uses dotted notation ("tls.cert_dir") and Value is stored as a string; scalar
+// values are written as YAML scalars, not quoted strings.
+type ConfigEntry struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
 }
 
 type Metrics struct {

@@ -109,6 +109,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/settings", s.protected(s.handleGetSettings))
 	s.mux.HandleFunc("PATCH /api/settings", s.protected(s.handleUpdateSettings))
 	s.mux.HandleFunc("POST /api/settings/apply-quota", s.protected(s.handleApplyDefaultQuota))
+	s.mux.HandleFunc("POST /api/settings/apply-config", s.protected(s.handleApplyConfig))
+	s.mux.HandleFunc("PUT /api/settings/tenant-config", s.protected(s.handleUpdateTenantConfig))
+	s.mux.HandleFunc("GET /api/settings/cert", s.protected(s.handleCertInfo))
+	s.mux.HandleFunc("POST /api/settings/cert/regenerate", s.protected(s.handleRegenerateCert))
+	s.mux.HandleFunc("POST /api/tenants/{id}/apply-config", s.protected(s.handleApplyTenantConfig))
 
 	s.mux.HandleFunc("/", s.serveStatic)
 }

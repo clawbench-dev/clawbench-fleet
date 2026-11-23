@@ -10,7 +10,7 @@ import (
 // handleGuestPage is the only tenant-shaped endpoint reachable without a
 // login. It returns the deliberately small GuestPage payload.
 func (s *Server) handleGuestPage(w http.ResponseWriter, r *http.Request) {
-	page, err := s.svc.GuestPage()
+	page, err := s.svc.GuestPageFor(r.Host)
 	if err != nil {
 		writeServiceErr(w, err)
 		return

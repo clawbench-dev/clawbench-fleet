@@ -23,6 +23,12 @@ func (s *Service) GetTenant(id int64) (*domain.Tenant, error) {
 }
 
 func (s *Service) TenantDetail(id int64) (*TenantDTO, error) {
+	return s.TenantDetailFor(id, "")
+}
+
+// TenantDetailFor is TenantDetail with the admin's browser host used to build
+// the employee address.
+func (s *Service) TenantDetailFor(id int64, browserHost string) (*TenantDTO, error) {
 	t, err := s.tenantByID(id)
 	if err != nil {
 		return nil, err
@@ -47,7 +53,7 @@ func (s *Service) TenantDetail(id int64) (*TenantDTO, error) {
 		s.RefreshTenantLastActive(ctx, t)
 		cancel()
 	}
-	dto := s.TenantDTO(*t)
+	dto := s.TenantDTOFor(*t, browserHost)
 	return &dto, nil
 }
 
@@ -78,22 +84,34 @@ type TenantDTO struct {
 }
 
 func (s *Service) TenantDTO(t domain.Tenant) TenantDTO {
+	return s.TenantDTOFor(t, "")
+}
+
+// TenantDTOFor is TenantDTO with the address host taken from the admin's
+// browser when no public host is configured.
+func (s *Service) TenantDTOFor(t domain.Tenant, browserHost string) TenantDTO {
 	return TenantDTO{
 		Tenant:    t,
-		Address:   s.Address(t),
+		Address:   s.AddressFor(t, browserHost),
 		Metrics:   s.GetMetrics(t.ID),
 		Protected: domain.ProtectedUsername(t.Username),
 	}
 }
 
 func (s *Service) ListTenants(f store.TenantFilter) ([]TenantDTO, int, error) {
+	return s.ListTenantsFor(f, "")
+}
+
+// ListTenantsFor is ListTenants with the admin's browser host used to build
+// the employee addresses.
+func (s *Service) ListTenantsFor(f store.TenantFilter, browserHost string) ([]TenantDTO, int, error) {
 	items, total, err := s.Store.ListTenants(f)
 	if err != nil {
 		return nil, 0, err
 	}
 	out := make([]TenantDTO, 0, len(items))
 	for _, t := range items {
-		out = append(out, s.TenantDTO(t))
+		out = append(out, s.TenantDTOFor(t, browserHost))
 	}
 	return out, total, nil
 }

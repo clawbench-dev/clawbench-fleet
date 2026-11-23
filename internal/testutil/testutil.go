@@ -58,6 +58,10 @@ func New(t *testing.T) *Platform {
 	cfg.System.HomeRoot = filepath.Join(cfg.DataDir, "dev", "homes")
 	cfg.System.SystemdDir = filepath.Join(cfg.DataDir, "dev", "units")
 	cfg.Backup.Enabled = false
+	// Certificate distribution writes extra files into each tenant's config
+	// directory. Tests that do not specifically cover TLS use plain HTTP so
+	// the temp-dir cleanup is not racing a background write.
+	cfg.TenantTLS.Enabled = false
 	if err := cfg.Normalize(); err != nil {
 		t.Fatalf("normalize: %v", err)
 	}

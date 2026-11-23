@@ -47,7 +47,16 @@ audit:
   retention_days: 180
 
 tls:
-  # 留空表示 HTTP；填证书目录则启用 HTTPS（tls.crt/tls.key 或 cert.pem/key.pem）
+  # 平台管理界面自己的 HTTPS 证书目录，留空表示平台走 HTTP。
+  # 注意：这个和下面「下发给实例的证书」是两回事，互不影响。
+  cert_dir: ""
+
+# 下发给每个员工实例的 HTTPS 证书（统一自签）。
+# 打开后平台自动生成一份自签证书，下发给所有实例共用；
+# 员工第一次打开实例时浏览器会警告一次，点继续即可。
+tenant_tls:
+  enabled: true
+  # 证书存放目录，留空使用 <data_dir>/certs
   cert_dir: ""
 
 system:

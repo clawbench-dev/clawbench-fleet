@@ -6,10 +6,13 @@ import { api, errorMessage } from '../api'
 import Modal from '../components/Modal.vue'
 import { auth } from '../stores/auth'
 import { toast } from '../stores/toast'
-import type { Job, Settings, SSHStatus } from '../types'
+import type { CertificateInfo, ConfigEntry, Job, Settings, SSHStatus } from '../types'
 
 const router = useRouter()
 const settings = ref<Settings | null>(null)
+const tenantConfig = ref<ConfigEntry[]>([])
+const cert = ref<CertificateInfo | null>(null)
+const certSaving = ref(false)
 const meta = ref<{
   mode: string
   public_host: string
@@ -38,8 +41,12 @@ async function load() {
       current_version: string
       fleet_version: string
       ssh_status: SSHStatus
+      certificate: CertificateInfo
+      tenant_config: ConfigEntry[]
     }>('/settings')
     settings.value = res.settings
+    tenantConfig.value = res.tenant_config || []
+    cert.value = res.certificate
     meta.value = {
       mode: res.mode,
       public_host: res.public_host,
@@ -85,7 +92,39 @@ async function save() {
     toast(err, 'error')
     return
   }
-  toast('设置已保存', 'success')
+  // The unified config lives in its own endpoint: it is a list, not a scalar
+  // setting, and it is saved without touching the instances.
+  try {
+    const res = await api.put<{ tenant_config: ConfigEntry[] }>('/settings/tenant-config', {
+      entries: tenantConfig.value.filter((e) => e.key.trim() || e.value.trim()),
+    })
+    tenantConfig.value = res.tenant_config
+  } catch (e) {
+    toast(errorMessage(e, '统一配置保存失败'), 'error')
+    return
+  }
+  toast('设置已保存（尚未下发到实例）', 'success')
+}
+
+function addConfigEntry() {
+  tenantConfig.value.push({ key: '', value: '' })
+}
+
+function removeConfigEntry(index: number) {
+  tenantConfig.value.splice(index, 1)
+}
+
+async function regenerateCert() {
+  certSaving.value = true
+  try {
+    const res = await api.post<{ certificate: CertificateInfo }>('/settings/cert/regenerate')
+    cert.value = res.certificate
+    toast('已重新生成证书，还需下发到实例才会生效', 'success')
+  } catch (e) {
+    toast(errorMessage(e, '生成证书失败'), 'error')
+  } finally {
+    certSaving.value = false
+  }
 }
 
 function openApply() {
@@ -155,6 +194,68 @@ const applyDone = computed(
   () => !!applyJob.value && ['succeeded', 'failed', 'partial'].includes(applyJob.value.status),
 )
 const applyRunning = computed(() => !!applyJob.value && !applyDone.value)
+
+// --- unified config push ---
+const cfgOpen = ref(false)
+const cfgStarting = ref(false)
+const cfgError = ref('')
+const cfgJob = ref<Job | null>(null)
+let cfgTimer = 0
+onBeforeUnmount(() => window.clearInterval(cfgTimer))
+
+const cfgDone = computed(
+  () => !!cfgJob.value && ['succeeded', 'failed', 'partial'].includes(cfgJob.value.status),
+)
+const cfgRunning = computed(() => !!cfgJob.value && !cfgDone.value)
+const cfgProgress = computed(() => {
+  if (!cfgJob.value || !cfgJob.value.total) return 0
+  return Math.round((cfgJob.value.done / cfgJob.value.total) * 100)
+})
+
+function openCfgApply() {
+  if (cfgJob.value && !cfgDone.value) {
+    cfgOpen.value = true
+    return
+  }
+  cfgError.value = ''
+  cfgJob.value = null
+  cfgOpen.value = true
+}
+
+function closeCfgApply() {
+  cfgOpen.value = false
+}
+
+async function startCfgApply() {
+  cfgError.value = ''
+  cfgStarting.value = true
+  try {
+    const res = await api.post<{ job: Job }>('/settings/apply-config')
+    cfgJob.value = res.job
+    cfgTimer = window.setInterval(async () => {
+      if (!cfgJob.value) return
+      try {
+        const r = await api.get<{ job: Job }>(`/jobs/${cfgJob.value.id}`)
+        cfgJob.value = r.job
+        if (cfgDone.value) {
+          window.clearInterval(cfgTimer)
+          const ok = r.job.done - r.job.failed
+          if (r.job.status === 'succeeded') {
+            toast(`配置已下发到 ${ok} 个实例`, 'success')
+          } else {
+            toast(`下发结束：成功 ${ok} 个，失败 ${r.job.failed} 个`, 'error')
+          }
+        }
+      } catch {
+        window.clearInterval(cfgTimer)
+      }
+    }, 1000)
+  } catch (e) {
+    cfgError.value = errorMessage(e, '下发失败')
+  } finally {
+    cfgStarting.value = false
+  }
+}
 const applySummary = computed(() => {
   if (!applyJob.value) return ''
   if (!applyDone.value) return '应用中'
@@ -344,7 +445,7 @@ async function changePassword() {
       <div class="form-grid">
         <div class="field">
           <label>对外主机名 / IP</label>
-          <input v-model="settings.public_host" class="input mono" placeholder="留空则自动检测本机内网 IP" />
+          <input v-model="settings.public_host" class="input mono" placeholder="留空则跟随浏览器的访问地址" />
         </div>
         <div class="field">
           <label>租户端口转发</label>
@@ -353,6 +454,95 @@ async function changePassword() {
             允许员工在自己的实例里开端口转发
           </label>
         </div>
+      </div>
+      <div class="small muted-2" style="margin-top: 10px">
+        员工地址固定用 https。这里留空时，地址里的 IP 就用你现在浏览器访问平台所用的那个地址。
+      </div>
+    </div>
+
+    <div class="card" style="margin-top: 16px">
+      <div class="card-header">
+        <div>
+          <div class="card-title">HTTPS 证书</div>
+          <div class="card-sub">平台统一生成一份自签证书，下发给所有实例共用</div>
+        </div>
+        <div class="row">
+          <label class="row small">
+            <input v-model="settings.tls_enabled" class="checkbox" type="checkbox" />
+            给所有实例启用 HTTPS
+          </label>
+          <button class="btn btn-sm" type="button" :disabled="certSaving" @click="regenerateCert">
+            重新生成证书
+          </button>
+        </div>
+      </div>
+      <div class="form-grid">
+        <div class="field">
+          <label>证书目录（留空用数据目录下的 certs）</label>
+          <input v-model="settings.tls_cert_dir" class="input mono" placeholder="留空则自动使用 &lt;数据目录&gt;/certs" />
+        </div>
+      </div>
+      <div v-if="cert" class="detail-grid" style="margin-top: 12px">
+        <div class="detail-item">
+          <span class="detail-label">状态</span>
+          <span class="detail-value">{{ cert.exists ? (cert.self_signed ? '自签证书，已就绪' : '证书已就绪') : '尚未生成' }}</span>
+        </div>
+        <div class="detail-item">
+          <span class="detail-label">目录</span>
+          <span class="detail-value mono small">{{ cert.dir }}</span>
+        </div>
+        <div class="detail-item">
+          <span class="detail-label">有效期至</span>
+          <span class="detail-value">{{ cert.not_after || '—' }}</span>
+        </div>
+        <div class="detail-item">
+          <span class="detail-label">覆盖地址</span>
+          <span class="detail-value mono small">{{ [...(cert.dns_names || []), ...(cert.ips || [])].join(', ') || '—' }}</span>
+        </div>
+      </div>
+      <div class="small muted-2" style="margin-top: 10px">
+        这是自签证书，员工第一次打开实例时浏览器会警告一次，点继续即可。换掉它或改完证书设置后，要下发一次才会生效。
+      </div>
+    </div>
+
+    <div class="card" style="margin-top: 16px">
+      <div class="card-header">
+        <div>
+          <div class="card-title">统一配置下发</div>
+          <div class="card-sub">这里填的配置项会覆盖实例里同名的设置，员工改不动</div>
+        </div>
+        <div class="row">
+          <button class="btn btn-sm" type="button" @click="addConfigEntry">添加一项</button>
+          <button class="btn btn-sm btn-primary" type="button" :disabled="cfgRunning" @click="openCfgApply">
+            {{ cfgRunning ? `下发中 ${cfgJob?.done}/${cfgJob?.total}` : '下发到所有实例' }}
+          </button>
+        </div>
+      </div>
+      <table v-if="tenantConfig.length" class="table">
+        <thead>
+          <tr>
+            <th style="width: 45%">配置项</th>
+            <th>值</th>
+            <th style="width: 60px"></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="(entry, i) in tenantConfig" :key="i">
+            <td>
+              <input v-model="entry.key" class="input mono" placeholder="例如 chat.page_size" />
+            </td>
+            <td>
+              <input v-model="entry.value" class="input mono" placeholder="值" />
+            </td>
+            <td>
+              <button class="btn btn-ghost btn-sm" type="button" @click="removeConfigEntry(i)">删除</button>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+      <div v-else class="small muted-2">还没有配置项。点「添加一项」，比如 <span class="mono">chat.page_size</span> = <span class="mono">50</span>。</div>
+      <div class="small muted-2" style="margin-top: 10px">
+        端口、监听地址、密码、证书目录由平台自己维护，不能在这里覆盖。保存只存平台这边，点「下发到所有实例」才会写进实例并重启它们。
       </div>
     </div>
 
@@ -498,6 +688,82 @@ async function changePassword() {
         <template v-else>
           <button v-if="applyRunning" class="btn" type="button" @click="closeApply">后台继续，关闭</button>
           <button v-else class="btn btn-primary" type="button" @click="closeApply">关闭</button>
+        </template>
+      </template>
+    </Modal>
+
+    <Modal v-if="cfgOpen" :title="cfgJob ? '下发统一配置' : '把统一配置下发到所有实例'" wide @close="closeCfgApply">
+      <template v-if="!cfgJob">
+        <p class="muted small" style="margin-top: 0">
+          平台会把下面这组配置项写进每个实例的 config.yaml（回收站里的除外），同名项以这里的值为准。
+        </p>
+        <div v-if="!tenantConfig.length" class="small muted-2" style="margin-bottom: 12px">
+          现在还没有配置项，下发只会重写端口、证书目录这些平台自己的项。
+        </div>
+        <div v-else class="table-wrap" style="max-height: 30vh; overflow: auto; margin-bottom: 12px">
+          <table class="table">
+            <thead>
+              <tr><th>配置项</th><th>值</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="(entry, i) in tenantConfig" :key="i">
+                <td class="mono small">{{ entry.key }}</td>
+                <td class="mono small">{{ entry.value }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <ul class="small muted" style="margin: 0; padding-left: 18px; line-height: 1.9">
+          <li>运行中的实例会重启一次，短暂中断几秒。</li>
+          <li>已停止或启动失败的实例只改配置文件，下次启动生效。</li>
+          <li>正在创建或删除的实例会被跳过。</li>
+          <li>改完配置项记得先点「保存设置」，再点这里下发。</li>
+        </ul>
+        <div v-if="cfgError" class="small" style="color: var(--red); margin-top: 10px">{{ cfgError }}</div>
+      </template>
+      <template v-else>
+        <div class="row-between" style="margin-bottom: 10px; flex-wrap: wrap; gap: 8px">
+          <span class="small muted-2">
+            {{ cfgJob.done }} / {{ cfgJob.total }}
+            <span v-if="cfgJob.failed" style="color: var(--red)"> · 失败 {{ cfgJob.failed }}</span>
+          </span>
+          <span
+            class="badge"
+            :class="cfgDone ? (cfgJob.status === 'succeeded' ? 'badge-ok' : cfgJob.status === 'partial' ? 'badge-neutral' : 'badge-failed') : 'badge-neutral'"
+          >
+            {{ cfgDone ? (cfgJob.status === 'succeeded' ? '已完成' : cfgJob.status === 'partial' ? '部分失败' : '失败') : '下发中' }}
+          </span>
+        </div>
+        <div class="progress" style="margin-bottom: 14px"><span :style="{ width: cfgProgress + '%' }" /></div>
+        <div v-if="!(cfgJob.items || []).length" class="muted small" style="padding: 12px 0">正在准备任务…</div>
+        <div v-else class="table-wrap" style="max-height: 46vh; overflow: auto">
+          <table class="table">
+            <thead>
+              <tr><th>实例</th><th>状态</th><th>说明</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="item in cfgJob.items || []" :key="item.id">
+                <td class="mono small">{{ item.name }}</td>
+                <td><span class="badge" :class="applyItemBadge(item.status)">{{ applyItemLabel(item.status) }}</span></td>
+                <td class="small" :style="item.error ? 'color: var(--red)' : ''">{{ item.error || '—' }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div v-if="cfgRunning" class="small muted-2" style="margin-top: 10px">
+          可以关掉这个窗口，任务会在后台继续，完成后会提示。
+        </div>
+      </template>
+      <template #footer>
+        <template v-if="!cfgJob">
+          <button class="btn" type="button" @click="closeCfgApply">取消</button>
+          <button class="btn btn-primary" type="button" :disabled="cfgStarting" @click="startCfgApply">
+            {{ cfgStarting ? '提交中…' : '确认下发' }}
+          </button>
+        </template>
+        <template v-else>
+          <button v-if="cfgRunning" class="btn" type="button" @click="closeCfgApply">后台继续，关闭</button>
+          <button v-else class="btn btn-primary" type="button" @click="closeCfgApply">关闭</button>
         </template>
       </template>
     </Modal>

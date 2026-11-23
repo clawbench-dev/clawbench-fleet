@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -35,6 +36,9 @@ type Service struct {
 
 	settingsMu sync.RWMutex
 	settings   domain.Settings
+
+	configMu     sync.RWMutex
+	tenantConfig []domain.ConfigEntry
 
 	locks     keyedMutex
 	createMu  sync.Mutex
@@ -89,19 +93,30 @@ func New(cfg config.Config, st *store.Store, sys sysops.System) (*Service, error
 	if err != nil {
 		return nil, err
 	}
-	if err := validateSettings(stg); err != nil {
+	if vErr := validateSettings(stg); vErr != nil {
+		return nil, vErr
+	}
+	entries, err := st.LoadTenantConfig()
+	if err != nil {
+		return nil, err
+	}
+	if err := validateTenantConfig(entries); err != nil {
+		return nil, err
+	}
+	if err := validateTLS(stg); err != nil {
 		return nil, err
 	}
 	s := &Service{
-		Cfg:        cfg,
-		Store:      st,
-		Sys:        sys,
-		settings:   stg,
-		sem:        make(chan struct{}, 4),
-		metrics:    map[int64]domain.Metrics{},
-		artifacts:  map[int64]map[string][]byte{},
-		artifactAt: map[int64]time.Time{},
-		http:       &http.Client{Timeout: 3 * time.Second, CheckRedirect: noRedirect},
+		Cfg:          cfg,
+		Store:        st,
+		Sys:          sys,
+		settings:     stg,
+		tenantConfig: entries,
+		sem:          make(chan struct{}, 4),
+		metrics:      map[int64]domain.Metrics{},
+		artifacts:    map[int64]map[string][]byte{},
+		artifactAt:   map[int64]time.Time{},
+		http:         &http.Client{Timeout: 3 * time.Second, CheckRedirect: noRedirect},
 		https: &http.Client{
 			Timeout:       3 * time.Second,
 			CheckRedirect: noRedirect,
@@ -145,6 +160,8 @@ func SettingsFromConfig(cfg config.Config) domain.Settings {
 		PublicHost:         cfg.Clawbench.PublicHost,
 		GuestEnabled:       true,
 		SSHEnabled:         cfg.SSH.Enabled,
+		TLSEnabled:         cfg.TenantTLS.Enabled,
+		TLSCertDir:         cfg.TenantTLS.CertDir,
 	}
 }
 
@@ -181,7 +198,58 @@ func validateSettings(s domain.Settings) error {
 	if err := validateQuotaSettings(s); err != nil {
 		return err
 	}
+	if err := validateTLS(s); err != nil {
+		return err
+	}
 	return validateRetentionSettings(s)
+}
+
+func validateTLS(s domain.Settings) error {
+	if s.TLSEnabled && s.TLSCertDir != "" && !filepath.IsAbs(s.TLSCertDir) {
+		return errors.New("证书目录必须是绝对路径")
+	}
+	return nil
+}
+
+// configKeyRe matches dotted lower-case keys such as "tls.cert_dir" or
+// "chat.page_size". Keeping it strict means a typo is rejected here instead of
+// silently landing in every instance's config.yaml.
+var configKeyRe = regexp.MustCompile(`^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$`)
+
+// reservedConfigKeys are the keys the platform owns: writing them from the
+// generic key/value table would fight with port changes, password resets and
+// the certificate distribution.
+var reservedConfigKeys = map[string]bool{
+	"port":                 true,
+	"host":                 true,
+	"password":             true,
+	"tls.cert_dir":         true,
+	"port_forward":         true,
+	"port_forward.enabled": true,
+}
+
+func validateTenantConfig(entries []domain.ConfigEntry) error {
+	seen := map[string]bool{}
+	for _, e := range entries {
+		key := strings.TrimSpace(e.Key)
+		if key == "" {
+			return errors.New("统一配置里有空的配置项名称")
+		}
+		if !configKeyRe.MatchString(key) {
+			return fmt.Errorf("配置项名称 %q 不合法：只能用小写字母、数字、下划线和点（例如 chat.page_size）", e.Key)
+		}
+		if reservedConfigKeys[key] {
+			return fmt.Errorf("配置项 %q 由平台自己维护，不能在这里覆盖", key)
+		}
+		if seen[key] {
+			return fmt.Errorf("配置项 %q 重复了", key)
+		}
+		if strings.ContainsAny(e.Value, "\n\r") {
+			return fmt.Errorf("配置项 %q 的值不能包含换行", key)
+		}
+		seen[key] = true
+	}
+	return nil
 }
 
 func validateRangeSettings(s domain.Settings) error {
@@ -257,6 +325,39 @@ func (s *Service) UpdateSettings(next domain.Settings) error {
 	return nil
 }
 
+// TenantConfig is the unified config pushed into every instance's config.yaml.
+func (s *Service) TenantConfig() []domain.ConfigEntry {
+	s.configMu.RLock()
+	defer s.configMu.RUnlock()
+	out := make([]domain.ConfigEntry, len(s.tenantConfig))
+	copy(out, s.tenantConfig)
+	return out
+}
+
+// UpdateTenantConfig validates and saves the unified config. Nothing is pushed
+// to instances here: a push restarts running instances, so it is a separate,
+// explicit step.
+func (s *Service) UpdateTenantConfig(entries []domain.ConfigEntry) error {
+	clean := make([]domain.ConfigEntry, 0, len(entries))
+	for _, e := range entries {
+		e.Key = strings.TrimSpace(e.Key)
+		if e.Key == "" && e.Value == "" {
+			continue
+		}
+		clean = append(clean, e)
+	}
+	if err := validateTenantConfig(clean); err != nil {
+		return err
+	}
+	if err := s.Store.SaveTenantConfig(clean); err != nil {
+		return err
+	}
+	s.configMu.Lock()
+	s.tenantConfig = clean
+	s.configMu.Unlock()
+	return nil
+}
+
 func (s *Service) PublicHost() string {
 	st := s.Settings()
 	if st.PublicHost != "" {
@@ -265,8 +366,46 @@ func (s *Service) PublicHost() string {
 	return config.DetectPublicHost()
 }
 
+// Address builds a tenant's URL. An operator-typed public host always wins;
+// otherwise the host the admin is already using in the browser is reused, so
+// a server reachable at 10.0.0.5 hands out 10.0.0.5 rather than whatever
+// interface DetectPublicHost happens to pick first.
 func (s *Service) Address(t domain.Tenant) string {
-	return t.Address(s.PublicHost())
+	return s.AddressFor(t, "")
+}
+
+// AddressFor is Address with the caller's host (the browser's Host header)
+// as the fallback. An empty browserHost keeps the old auto-detection.
+func (s *Service) AddressFor(t domain.Tenant, browserHost string) string {
+	if st := s.Settings(); st.PublicHost != "" {
+		return t.Address(st.PublicHost)
+	}
+	if host := normalizeHost(browserHost); host != "" {
+		return t.Address(host)
+	}
+	return t.Address(config.DetectPublicHost())
+}
+
+// normalizeHost strips the port and IPv6 brackets from a Host header so it can
+// be recombined with a tenant's own port.
+func normalizeHost(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if host, _, err := net.SplitHostPort(raw); err == nil {
+		raw = host
+	}
+	raw = strings.Trim(raw, "[]")
+	// A loopback host in the browser would produce useless employee links, so
+	// fall back to auto-detection in that case.
+	if ip := net.ParseIP(raw); ip != nil && ip.IsLoopback() {
+		return ""
+	}
+	if strings.EqualFold(raw, "localhost") {
+		return ""
+	}
+	return raw
 }
 
 // --- locking ---
@@ -404,6 +543,25 @@ func (s *Service) writeTenantConfig(t *domain.Tenant, password string) error {
 	pf["transport"] = "h2"
 	cfg["port_forward"] = pf
 
+	// The certificate copy lives next to the tenant's config so the files can
+	// be owned by that tenant. Only point Clawbench at it once it is there.
+	if s.Settings().TLSEnabled {
+		if err := s.distributeCert(t); err != nil {
+			return err
+		}
+		cfg["tls"] = map[string]any{"cert_dir": tenantCertDir(t)}
+	} else if tlsCfg, ok := cfg["tls"].(map[string]any); ok {
+		// Dropping the section is what turns HTTPS back off: Clawbench falls
+		// back to plain HTTP when cert_dir is missing or empty.
+		delete(tlsCfg, "cert_dir")
+		if len(tlsCfg) == 0 {
+			delete(cfg, "tls")
+		}
+	}
+
+	// Unified config last, so it wins over anything already in the file.
+	applyTenantConfigEntries(cfg, s.TenantConfig())
+
 	data, err := yamlMarshal(cfg)
 	if err != nil {
 		return err
@@ -436,6 +594,55 @@ func (s *Service) writeTenantConfig(t *domain.Tenant, password string) error {
 // older location.
 func (s *Service) tenantConfigPath(t *domain.Tenant) string {
 	return filepath.Join(t.DataDir, "config", "config.yaml")
+}
+
+// applyTenantConfigEntries writes the platform's key/value table into cfg.
+// Keys are dotted paths ("chat.page_size") and each segment becomes a YAML
+// mapping level, so an operator can set nested settings without a schema.
+func applyTenantConfigEntries(cfg map[string]any, entries []domain.ConfigEntry) {
+	for _, e := range entries {
+		key := strings.TrimSpace(e.Key)
+		if key == "" {
+			continue
+		}
+		setConfigPath(cfg, strings.Split(key, "."), parseConfigValue(e.Value))
+	}
+}
+
+func setConfigPath(cfg map[string]any, path []string, value any) {
+	for i, seg := range path {
+		if i == len(path)-1 {
+			cfg[seg] = value
+			return
+		}
+		next, ok := cfg[seg].(map[string]any)
+		if !ok {
+			// A scalar already sits where a section should be. The platform
+			// value wins, so replace it with a mapping.
+			next = map[string]any{}
+			cfg[seg] = next
+		}
+		cfg = next
+	}
+}
+
+// parseConfigValue keeps numbers and booleans as real YAML types; everything
+// else stays a string. Writing "20" as a string would break Clawbench settings
+// that expect an integer.
+func parseConfigValue(raw string) any {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "true":
+		return true
+	case "false":
+		return false
+	}
+	if n, err := strconv.Atoi(raw); err == nil {
+		return n
+	}
+	if f, err := strconv.ParseFloat(raw, 64); err == nil {
+		return f
+	}
+	return raw
 }
 
 // --- health ---
@@ -760,7 +967,7 @@ Group=%s
 WorkingDirectory=%s
 Environment=HOME=%s
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
-ExecStart=%s/current/clawbench --port %d --data-dir %s --managed
+ExecStart=%s/current/clawbench --port %d --data-dir %s
 Restart=always
 RestartSec=3
 TimeoutStopSec=30

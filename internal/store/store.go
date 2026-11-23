@@ -281,4 +281,39 @@ func (s *Store) SaveSettings(v domain.Settings) error {
 	return err
 }
 
+// LoadTenantConfig returns the unified config entries pushed to instances. It
+// lives in its own settings row because it is a list: keeping it inside the
+// scalar Settings value would make Settings non-comparable for no reason.
+func (s *Store) LoadTenantConfig() ([]domain.ConfigEntry, error) {
+	var raw string
+	err := s.db.QueryRow(`SELECT value FROM settings WHERE key='tenant_config'`).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return []domain.ConfigEntry{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	out := []domain.ConfigEntry{}
+	// Broken JSON is treated as "no unified config" rather than an error: the
+	// row is advisory data, and failing here would block the whole platform
+	// from starting over one bad value.
+	if uErr := json.Unmarshal([]byte(raw), &out); uErr != nil {
+		return []domain.ConfigEntry{}, nil //nolint:nilerr // see above
+	}
+	return out, nil
+}
+
+func (s *Store) SaveTenantConfig(entries []domain.ConfigEntry) error {
+	if entries == nil {
+		entries = []domain.ConfigEntry{}
+	}
+	data, err := json.Marshal(entries)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`INSERT INTO settings(key, value) VALUES('tenant_config', ?)
+		ON CONFLICT(key) DO UPDATE SET value=excluded.value`, string(data))
+	return err
+}
+
 func (s *Store) Ping() error { return s.db.Ping() }
