@@ -306,6 +306,29 @@ p {
   gap: 16px;
 }
 
+/* 卡片里的表单区吃掉剩余高度，把按钮/说明压到卡片底部，
+   这样被拉高的卡片不会只是一块空白 */
+.grid > .card {
+  display: flex;
+  flex-direction: column;
+  /* 显式撑满行高：只靠 grid 的 stretch 时，内容多的一侧定高后
+     另一侧沿底部对齐、顶边留空（浅色底＋圆角看得见） */
+  height: 100%;
+  /* 自身外边距一律去掉：.card + .card 的 margin-top 在网格行里会把卡片
+     往下推 16px、底边溢出到行外，同一行顶边对不齐 */
+  margin: 0;
+}
+
+.grid > .card > .form-grid,
+.grid > .card > .stack,
+.grid > .card > .detail-grid {
+  flex: 1 1 auto;
+}
+
+.grid > .card > .form-actions {
+  margin-top: auto;
+}
+
 .grid-2 {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
