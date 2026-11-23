@@ -253,6 +253,20 @@ func (s *Server) handleRepair(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+func (s *Server) handleRefreshDisk(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_id", err.Error())
+		return
+	}
+	t, err := s.svc.RefreshTenantDisk(r.Context(), id, auditCtx(r))
+	if err != nil {
+		writeServiceErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{fieldTenant: s.svc.TenantDTO(*t)})
+}
+
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	id, err := pathID(r)
 	if err != nil {

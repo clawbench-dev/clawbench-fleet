@@ -632,7 +632,11 @@ func (r *Real) DiskUsage(ctx context.Context, path string) (int64, error) {
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
 		return 0, nil
 	}
-	out, err := run(ctx, "du", "-sb", "--", path)
+	// -x keeps du on the home directory's own filesystem. Without it a mount
+	// point inside the home (or, worse, the home itself being a mount) drags in
+	// whatever else lives on that device. -b counts apparent bytes, so the
+	// number matches what the files claim to be rather than the blocks used.
+	out, err := run(ctx, "du", "-sbx", "--", path)
 	if err != nil {
 		return 0, err
 	}

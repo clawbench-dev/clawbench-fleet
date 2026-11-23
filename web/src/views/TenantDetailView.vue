@@ -126,6 +126,34 @@ watch(usageWindow, () => {
   if (tab.value === 'usage') loadUsage()
 })
 
+const diskMeasuring = ref(false)
+
+// A never-sampled tenant has disk_checked_at empty and disk_bytes 0. Showing
+// "0 B" there is a lie: it means "not measured yet", which is a different
+// thing from an empty home directory.
+const diskText = computed(() => {
+  const t = tenant.value
+  if (!t) return '—'
+  if (!t.disk_checked_at) return '未统计'
+  return formatBytes(t.disk_bytes)
+})
+
+async function refreshDisk() {
+  if (diskMeasuring.value) return
+  diskMeasuring.value = true
+  busy.value = 'disk'
+  try {
+    const res = await api.post<{ tenant: Tenant }>(`/tenants/${id.value}/disk/refresh`, {})
+    tenant.value = res.tenant
+    toast('磁盘统计已更新', 'success')
+  } catch (e) {
+    toast(errorMessage(e, '统计磁盘失败'), 'error')
+  } finally {
+    diskMeasuring.value = false
+    busy.value = ''
+  }
+}
+
 async function loadUsage() {
   usageLoading.value = true
   usageError.value = ''
@@ -552,7 +580,25 @@ function download(backup: Backup) {
           <div class="detail-item" style="grid-column: span 2"><span class="detail-label">systemd 单元</span><span class="detail-value mono">{{ tenant.unit_name }}</span></div>
           <div class="detail-item"><span class="detail-label">最后健康检查</span><span class="detail-value">{{ formatTime(tenant.last_health_at) }}</span></div>
           <div class="detail-item"><span class="detail-label">最近活跃</span><span class="detail-value">{{ formatAgo(tenant.last_active_at) }}</span></div>
-          <div class="detail-item"><span class="detail-label">磁盘占用</span><span class="detail-value">{{ formatBytes(tenant.disk_bytes) }}</span></div>
+          <div class="detail-item">
+            <span class="detail-label">磁盘占用</span>
+            <span class="detail-value row" style="gap: 8px; flex-wrap: wrap">
+              <span>{{ diskText }}</span>
+              <button
+                v-if="!trashed"
+                class="btn btn-ghost btn-sm"
+                type="button"
+                :disabled="diskMeasuring"
+                @click="refreshDisk"
+              >
+                <RefreshCw :size="13" :class="{ spin: diskMeasuring }" />
+                {{ diskMeasuring ? '统计中…' : '立即统计' }}
+              </button>
+            </span>
+            <span v-if="tenant.disk_checked_at" class="detail-label" style="font-weight: 400">
+              上次统计：{{ formatAgo(tenant.disk_checked_at) }}
+            </span>
+          </div>
           <div class="detail-item" style="grid-column: span 2">
             <span class="detail-label">SSH 登录</span>
             <span class="row" style="gap: 8px; flex-wrap: wrap">

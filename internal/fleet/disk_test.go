@@ -366,3 +366,64 @@ func waitJobFinished(t *testing.T, svc *Service, id int64) *domain.Job {
 	t.Fatalf("job %d never finished", id)
 	return nil
 }
+
+func TestRefreshTenantDiskStoresSize(t *testing.T) {
+	svc, rec := newDiskTestService(t)
+	tenant := createRunning(t, svc, "alice")
+	rec.usage[tenant.Username] = 1234
+
+	fresh, err := svc.RefreshTenantDisk(context.Background(), tenant.ID, AuditContext{Actor: "tester"})
+	if err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if fresh.DiskBytes != 1234 {
+		t.Fatalf("disk_bytes = %d, want 1234", fresh.DiskBytes)
+	}
+	if fresh.DiskChecked == "" {
+		t.Fatal("disk_checked_at not set")
+	}
+	stored, _ := svc.GetTenant(tenant.ID)
+	if stored.DiskBytes != 1234 || stored.DiskChecked == "" {
+		t.Fatalf("store not updated: %+v", stored)
+	}
+}
+
+func TestRefreshTenantDiskReportsError(t *testing.T) {
+	svc, rec := newDiskTestService(t)
+	tenant := createRunning(t, svc, "bob")
+	rec.usageErr = errors.New("du failed")
+
+	if _, err := svc.RefreshTenantDisk(context.Background(), tenant.ID, AuditContext{Actor: "tester"}); err == nil {
+		t.Fatal("a failed measurement must surface an error")
+	}
+	fresh, _ := svc.GetTenant(tenant.ID)
+	if fresh.DiskChecked != "" {
+		t.Fatalf("a failed measurement must not stamp disk_checked_at: %+v", fresh)
+	}
+}
+
+func TestRefreshTenantDiskSkipsTrashed(t *testing.T) {
+	svc, _ := newDiskTestService(t)
+	tenant := createRunning(t, svc, "carol")
+	if err := svc.Store.SetTenantStatus(tenant.ID, domain.StatusTrashed, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.RefreshTenantDisk(context.Background(), tenant.ID, AuditContext{Actor: "tester"}); err == nil {
+		t.Fatal("trashed tenants must not be measured")
+	}
+}
+
+func TestLogDiskFailureOncePerDay(t *testing.T) {
+	svc, _ := newDiskTestService(t)
+	tenant := createRunning(t, svc, "erin")
+	first := svc.shouldLogDiskFailure(tenant.Username)
+	if !first {
+		t.Fatal("first failure of the day should be logged")
+	}
+	if svc.shouldLogDiskFailure(tenant.Username) {
+		t.Fatal("second failure of the same tenant on the same day must be dropped")
+	}
+	if !svc.shouldLogDiskFailure("frank") {
+		t.Fatal("a different tenant should still be logged")
+	}
+}

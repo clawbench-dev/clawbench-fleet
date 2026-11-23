@@ -83,6 +83,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/tenants/{id}/repair", s.protected(s.handleRepair))
 	s.mux.HandleFunc("GET /api/tenants/{id}/logs", s.protected(s.handleLogs))
 	s.mux.HandleFunc("GET /api/tenants/{id}/metrics", s.protected(s.handleMetrics))
+	s.mux.HandleFunc("POST /api/tenants/{id}/disk/refresh", s.protected(s.handleRefreshDisk))
 	s.mux.HandleFunc("GET /api/tenants/{id}/backups", s.protected(s.handleListBackups))
 	s.mux.HandleFunc("POST /api/tenants/{id}/backups", s.protected(s.handleCreateBackup))
 	s.mux.HandleFunc("POST /api/tenants/{id}/backups/{backupID}/restore", s.protected(s.handleRestoreBackup))

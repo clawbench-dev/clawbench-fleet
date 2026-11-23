@@ -500,7 +500,7 @@ function scanStatus(c: AdoptCandidate) {
             <td class="mono small">{{ t.version || '—' }}</td>
             <td class="num small">{{ formatPercent(t.metrics?.cpu_percent || 0) }}</td>
             <td class="num small">{{ formatBytes(t.metrics?.memory_bytes || 0) }}</td>
-            <td class="num small">{{ formatBytes(t.disk_bytes || 0) }}</td>
+            <td class="num small">{{ t.disk_checked_at ? formatBytes(t.disk_bytes || 0) : '未统计' }}</td>
             <td class="small" :title="'最近一次对话：' + formatTime(t.last_active_at)">{{ formatAgo(t.last_active_at) }}</td>
             <td>
               <div class="actions">
