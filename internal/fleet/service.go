@@ -647,10 +647,8 @@ func parseConfigValue(raw string) any {
 
 // --- health ---
 
-// noRedirect stops the health clients from following redirects on their own:
-// an instance with TLS enabled answers plain http with a 301 to https on the
-// same port, and that hop needs a client that accepts its self-signed
-// certificate.
+// noRedirect stops the health clients from following redirects on their own,
+// so a redirect can be inspected instead of silently followed.
 func noRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
 // healthTLSRedirect reports that the instance asked for the health check over
@@ -659,13 +657,25 @@ type healthTLSRedirect struct{ url string }
 
 func (e *healthTLSRedirect) Error() string { return "health endpoint requires https" }
 
+// healthCheck probes the instance. An instance with a certificate serves TLS
+// on its only port and rejects a plain-HTTP request outright (the TLS handshake
+// fails and net/http answers 400), so HTTPS is tried first. Plain HTTP stays as
+// the fallback for instances that have no certificate, including ones this
+// platform did not ship a certificate to.
 func (s *Service) healthCheck(ctx context.Context, port int) (*domain.HealthInfo, error) {
-	info, err := s.getHealth(ctx, s.http, fmt.Sprintf("http://127.0.0.1:%d/api/health", port))
+	info, tlsErr := s.getHealth(ctx, s.https, fmt.Sprintf("https://127.0.0.1:%d/api/health", port))
+	if tlsErr == nil {
+		return info, nil
+	}
+	httpInfo, httpErr := s.getHealth(ctx, s.http, fmt.Sprintf("http://127.0.0.1:%d/api/health", port))
+	if httpErr == nil {
+		return httpInfo, nil
+	}
 	var redirect *healthTLSRedirect
-	if errors.As(err, &redirect) {
+	if errors.As(httpErr, &redirect) {
 		return s.getHealth(ctx, s.https, redirect.url)
 	}
-	return info, err
+	return nil, httpErr
 }
 
 func (s *Service) getHealth(ctx context.Context, client *http.Client, rawURL string) (*domain.HealthInfo, error) {

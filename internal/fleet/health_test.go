@@ -43,9 +43,8 @@ func TestHealthCheckPlainHTTP(t *testing.T) {
 	}
 }
 
-// An instance with TLS enabled answers plain http with a 301 to https on the
-// same port and serves a self-signed certificate. The health check has to
-// follow that hop and still validate the body.
+// Some deployments put a plain-HTTP instance behind something that redirects to
+// HTTPS. The health check still has to follow that hop and validate the body.
 func TestHealthCheckFollowsHTTPSRedirect(t *testing.T) {
 	svc, _ := newTestService(t)
 	tlsSrv := httptest.NewTLSServer(healthHandler("clawbench", "v0.146.0"))
@@ -93,5 +92,38 @@ func TestHealthCheckRejectsNonClawbenchOverHTTPS(t *testing.T) {
 
 	if _, err := svc.healthCheck(context.Background(), portOf(t, plain)); err == nil {
 		t.Fatal("non-clawbench health response should fail")
+	}
+}
+
+// This is the real shape of an instance the platform shipped a certificate to:
+// Clawbench serves TLS on its only port, so a plain-HTTP request dies in the
+// handshake and net/http answers 400. It never redirects. The health check has
+// to reach it over HTTPS instead of waiting for a redirect that never comes.
+func TestHealthCheckTLSOnlyInstance(t *testing.T) {
+	svc, _ := newTestService(t)
+	tlsSrv := httptest.NewTLSServer(healthHandler("clawbench", "v0.146.0"))
+	defer tlsSrv.Close()
+
+	info, err := svc.healthCheck(context.Background(), portOf(t, tlsSrv))
+	if err != nil {
+		t.Fatalf("health against a TLS-only instance: %v", err)
+	}
+	if info.App != "clawbench" || info.Version != "v0.146.0" {
+		t.Fatalf("health = %+v", info)
+	}
+}
+
+// A TCP listener that is not speaking TLS must still fail, not be mistaken for
+// a healthy instance just because HTTPS was tried first.
+func TestHealthCheckPlainHTTPWithoutClawbenchBody(t *testing.T) {
+	svc, _ := newTestService(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"app":"something-else"}`))
+	}))
+	defer srv.Close()
+
+	if _, err := svc.healthCheck(context.Background(), portOf(t, srv)); err == nil {
+		t.Fatal("a non-clawbench body should fail even over plain HTTP")
 	}
 }
