@@ -184,6 +184,9 @@ func (s *Service) ownCertDir(t *domain.Tenant, dir string) error {
 	for _, name := range []string{fleetCertFile, fleetKeyFile} {
 		_ = s.Sys.Chown(ctx, filepath.Join(dir, name), t.UID, t.GID)
 	}
+	// config/ was created root-owned before the data directory was handed
+	// over; give it back so later writes by the tenant work too.
+	_ = s.ownTenantDataDir(t)
 	return nil
 }
 

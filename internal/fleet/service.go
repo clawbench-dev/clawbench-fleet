@@ -526,10 +526,10 @@ func (s *Service) writeTenantConfig(t *domain.Tenant, password string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	cfg := map[string]any{}
-	if data, err := os.ReadFile(path); err == nil {
-		_ = yamlUnmarshal(data, &cfg)
+	if err := s.ownTenantDataDir(t); err != nil {
+		return err
 	}
+	cfg := readTenantConfig(path)
 	cfg["port"] = t.Port
 	cfg["host"] = "0.0.0.0"
 	if password != "" {
@@ -587,6 +587,37 @@ func (s *Service) writeTenantConfig(t *domain.Tenant, password string) error {
 		_ = os.Chown(tmpName, t.UID, t.GID)
 	}
 	return os.Rename(tmpName, path)
+}
+
+// readTenantConfig loads the existing config so unknown keys an operator added
+// survive a rewrite. A missing or unparsable file starts from an empty map.
+func readTenantConfig(path string) map[string]any {
+	cfg := map[string]any{}
+	if data, err := os.ReadFile(path); err == nil {
+		_ = yamlUnmarshal(data, &cfg)
+	}
+	return cfg
+}
+
+// ownTenantDataDir hands the tenant's data directory to the tenant itself.
+// The platform runs as root, so every directory it creates (and the
+// .clawbench one useradd leaves root-owned when the account already existed)
+// belongs to root unless it is given away here. The instance runs as the
+// tenant and writes its self-path and data files there, so anything left
+// root-owned makes it fail with permission denied.
+func (s *Service) ownTenantDataDir(t *domain.Tenant) error {
+	// Only the real backend has real uids to hand the directory to.
+	if s.Sys.Mode() != "systemd" || t.UID <= 0 || t.DataDir == "" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	// -R also repairs directories left over from an earlier attempt. The
+	// directory is 0700, so nothing outside the tenant can reach it.
+	if err := s.Sys.Chown(ctx, t.DataDir, t.UID, t.GID); err != nil {
+		return fmt.Errorf("把数据目录交给租户 %s: %w", t.Username, err)
+	}
+	return nil
 }
 
 // tenantConfigPath follows the tenant record rather than the configured home
