@@ -22,8 +22,20 @@ type selfSys struct {
 	replaceErr     error
 	restartErr     error
 
+	// holders is what PortHolders reports; pid 1 stands in for another process
+	// holding the platform's port, and os.Getpid() for the platform itself.
+	holders      []sysops.PortHolder
+	portHoldErr  error
+	killedPID    []int
+	killErr      error
+	writeUnitErr error
+
 	replaced  []string
 	restarted int
+
+	// order records the steps that matter, so a test can prove the service is
+	// installed before anything is stopped.
+	order []string
 }
 
 // Mode reports the installed server so the self-upgrade path is reachable.
@@ -63,7 +75,45 @@ func withSelfSys(t *testing.T) (*Service, *selfSys) {
 	}
 	sys := &selfSys{Fake: fake, checkupVersion: "0.9.0"}
 	svc.Sys = sys
+	// AdoptSelf refuses to run without the config file the unit will name.
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("listen: 0.0.0.0:30000\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	svc.ConfigPath = cfgPath
 	return svc, sys
+}
+
+// PortHolders is answered from the test's script instead of the fake machine:
+// what the platform does with a hand-started process is exactly what the tests
+// need to control.
+func (s *selfSys) PortHolders(ctx context.Context, port int, username string) ([]sysops.PortHolder, error) {
+	if s.portHoldErr != nil {
+		return nil, s.portHoldErr
+	}
+	return s.holders, nil
+}
+
+func (s *selfSys) KillProcess(ctx context.Context, pid int) error {
+	if s.killErr != nil {
+		return s.killErr
+	}
+	s.killedPID = append(s.killedPID, pid)
+	s.order = append(s.order, "kill")
+	return nil
+}
+
+func (s *selfSys) WriteUnit(ctx context.Context, unit, content string) error {
+	if s.writeUnitErr != nil {
+		return s.writeUnitErr
+	}
+	s.order = append(s.order, "write")
+	return s.Fake.WriteUnit(ctx, unit, content)
+}
+
+func (s *selfSys) Enable(ctx context.Context, unit string) error {
+	s.order = append(s.order, "enable")
+	return s.Fake.Enable(ctx, unit)
 }
 
 // TestUploadSelfIsRefusedInDev guards the one configuration where a swap would
@@ -183,5 +233,100 @@ func TestSelfBinaryPointsAtAResolvedPath(t *testing.T) {
 	exe := svc.SelfBinary()
 	if exe == "" || !filepath.IsAbs(exe) {
 		t.Fatalf("self binary = %q", exe)
+	}
+}
+
+// TestAdoptSelfInstallsTheServiceBeforeStoppingAnything is the property the
+// whole button rests on. The hand-started process is what answers the page, so
+// stopping it before the unit exists would leave nothing to start it again.
+func TestAdoptSelfInstallsTheServiceBeforeStoppingAnything(t *testing.T) {
+	svc, sys := withSelfSys(t)
+	sys.holders = []sysops.PortHolder{{PID: 1}}
+	res, err := svc.AdoptSelf(context.Background(), AuditContext{Actor: "tester"})
+	if err != nil {
+		t.Fatalf("adopt: %v", err)
+	}
+	if !res.Restarting || res.Stopped != 1 {
+		t.Fatalf("result = %+v", res)
+	}
+	want := []string{"write", "enable", "kill"}
+	if strings.Join(sys.order, ",") != strings.Join(want, ",") {
+		t.Fatalf("order = %v, want %v", sys.order, want)
+	}
+	if sys.restarted != 1 {
+		t.Fatalf("restarted = %d", sys.restarted)
+	}
+	unit, readErr := sys.ReadUnit(context.Background(), sysops.SelfUnit)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !strings.Contains(unit, svc.SelfBinary()+" --config "+svc.ConfigPath) {
+		t.Fatalf("unit does not start the running binary:\n%s", unit)
+	}
+	if !strings.Contains(unit, "WantedBy=multi-user.target") {
+		t.Fatalf("unit is not enabled on boot:\n%s", unit)
+	}
+}
+
+// TestAdoptSelfLeavesThisProcessAlone guards the reply: the platform marks its
+// own PID in the port holder list, and ending it here would drop the response.
+func TestAdoptSelfLeavesThisProcessAlone(t *testing.T) {
+	svc, sys := withSelfSys(t)
+	sys.holders = []sysops.PortHolder{{PID: os.Getpid(), Self: true}}
+	res, err := svc.AdoptSelf(context.Background(), AuditContext{Actor: "tester"})
+	if err != nil {
+		t.Fatalf("adopt: %v", err)
+	}
+	if res.Stopped != 0 || len(sys.killedPID) != 0 {
+		t.Fatalf("killed = %v", sys.killedPID)
+	}
+}
+
+// TestAdoptSelfChangesNothingWhenTheUnitCannotBeWritten keeps the promise the
+// page makes: a failure before the swap leaves the machine as it was.
+func TestAdoptSelfChangesNothingWhenTheUnitCannotBeWritten(t *testing.T) {
+	svc, sys := withSelfSys(t)
+	sys.writeUnitErr = errors.New("read-only file system")
+	sys.holders = []sysops.PortHolder{{PID: 1}}
+	if _, err := svc.AdoptSelf(context.Background(), AuditContext{Actor: "tester"}); err == nil {
+		t.Fatal("a failed write must be reported")
+	}
+	if len(sys.killedPID) != 0 || sys.restarted != 0 {
+		t.Fatalf("killed = %v restarted = %d", sys.killedPID, sys.restarted)
+	}
+}
+
+// TestAdoptSelfRefusesWhenTheConfigFileIsMissing protects a custom --config
+// deployment: handing it to a unit that names a missing file would stop the
+// only running copy and start nothing.
+func TestAdoptSelfRefusesWhenTheConfigFileIsMissing(t *testing.T) {
+	svc, sys := withSelfSys(t)
+	svc.ConfigPath = filepath.Join(t.TempDir(), "nope.yaml")
+	sys.holders = []sysops.PortHolder{{PID: 1}}
+	if _, err := svc.AdoptSelf(context.Background(), AuditContext{Actor: "tester"}); err == nil {
+		t.Fatal("a missing config file must be reported")
+	}
+	if len(sys.order) != 0 || len(sys.killedPID) != 0 || sys.restarted != 0 {
+		t.Fatalf("nothing may be touched: %v %v %d", sys.order, sys.killedPID, sys.restarted)
+	}
+}
+
+// TestAdoptSelfIsRefusedInDev: dev has no unit to hand over to.
+func TestAdoptSelfIsRefusedInDev(t *testing.T) {
+	svc := newService(t)
+	if _, err := svc.AdoptSelf(context.Background(), AuditContext{}); err == nil {
+		t.Fatal("dev mode must refuse adoption")
+	}
+}
+
+// TestListenPortReadsTheConfiguredAddress covers the address shapes an operator
+// can put in the config file.
+func TestListenPortReadsTheConfiguredAddress(t *testing.T) {
+	port, err := listenPort("0.0.0.0:30000")
+	if err != nil || port != 30000 {
+		t.Fatalf("port = %d err = %v", port, err)
+	}
+	if _, err := listenPort("30000"); err == nil {
+		t.Fatal("an address without a host must be an error")
 	}
 }

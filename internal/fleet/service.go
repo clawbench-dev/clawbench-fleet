@@ -34,6 +34,12 @@ type Service struct {
 	Store *store.Store
 	Sys   sysops.System
 
+	// ConfigPath is the --config value this process was started with. The
+	// systemd unit written by AdoptSelf has to name the same file, otherwise
+	// the service comes back reading defaults or another deployment's data.
+	// main sets it; tests and library users leave it empty to use the default.
+	ConfigPath string
+
 	settingsMu sync.RWMutex
 	settings   domain.Settings
 

@@ -149,6 +149,17 @@ func TestPortHelpers(t *testing.T) {
 	}
 }
 
+func TestPortHoldersRejectsInvalidPort(t *testing.T) {
+	r := NewReal(t.TempDir(), "/usr/sbin/nologin", "/home")
+	// Port 0 would turn the ss filter into "every listening socket" and the
+	// caller would then stop every server on the machine.
+	for _, port := range []int{0, -1, 65536} {
+		if _, err := r.PortHolders(context.Background(), port, "root"); err == nil {
+			t.Fatalf("port %d must be rejected", port)
+		}
+	}
+}
+
 func TestWaitPortClosed(t *testing.T) {
 	// Port 1 is closed, so the wait returns on the first probe.
 	if err := waitPortClosed(context.Background(), 1, 1); err != nil {

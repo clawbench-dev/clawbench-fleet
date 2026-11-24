@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -61,6 +62,13 @@ func (r *Real) ReplaceSelf(src, dst string) error {
 		return err
 	}
 	tmpName := tmp.Name()
+	// The mode has to be right before the rename: a chmod after it could fail
+	// and leave dst replaced by a file nobody can execute.
+	if chmodErr := tmp.Chmod(0o755); chmodErr != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return chmodErr
+	}
 	if _, err := io.Copy(tmp, in); err != nil {
 		_ = tmp.Close()
 		_ = os.Remove(tmpName)
@@ -74,22 +82,33 @@ func (r *Real) ReplaceSelf(src, dst string) error {
 		_ = os.Remove(tmpName)
 		return err
 	}
-	return os.Chmod(dst, 0o755) //nolint:gosec // the platform binary must be executable
+	return nil
 }
 
 // RestartSelf asks systemd to restart the platform. The caller is expected to
 // have finished writing its response: once the restart is accepted the process
 // is gone within a moment.
-func (r *Real) RestartSelf(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
+func (r *Real) RestartSelf(_ context.Context) error {
+	// The context is deliberately detached from the caller's: cancelling it on
+	// return would kill systemctl before it has queued the job.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	cmd := exec.CommandContext(ctx, "systemctl", "restart", SelfUnit)
 	if err := cmd.Start(); err != nil {
+		cancel()
 		return &CommandError{Name: "systemctl", Args: []string{"restart", SelfUnit}, Err: err}
 	}
-	// Nothing is waited for here: systemd stops this very process as part of
-	// the restart, and waiting would turn the reply into a failure the caller
-	// never sees.
-	time.AfterFunc(selfStopDelay, func() { _ = syscall.Kill(os.Getpid(), syscall.SIGTERM) })
+	// The reply is written by the caller right after this returns, so the exit
+	// status cannot be part of the answer. It is checked in the background
+	// instead: a refused restart means nothing will replace this process, and
+	// ending it would leave the machine with no platform at all.
+	go func() {
+		defer cancel()
+		if waitErr := cmd.Wait(); waitErr != nil {
+			log.Printf("systemctl restart %s 失败，平台继续运行旧进程：%v", SelfUnit, waitErr)
+			return
+		}
+		time.Sleep(selfStopDelay)
+		_ = syscall.Kill(os.Getpid(), syscall.SIGTERM)
+	}()
 	return nil
 }

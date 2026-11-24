@@ -87,6 +87,23 @@ func (s *Server) handleSelfInfo(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.svc.SelfUpgradeInfo())
 }
 
+// handleSelfAdopt writes the platform's own systemd unit, enables it and
+// restarts through it. Like the self upgrade, the reply is written before the
+// process goes away: the page then waits for /api/health instead of treating
+// the dropped connection as a failure.
+func (s *Server) handleSelfAdopt(w http.ResponseWriter, r *http.Request) {
+	res, err := s.svc.AdoptSelf(r.Context(), auditCtx(r))
+	if err != nil && (res == nil || !res.Restarting) {
+		writeServiceErr(w, err)
+		return
+	}
+	body := map[string]any{"result": res, "restarting": res.Restarting}
+	if err != nil {
+		body["warning"] = err.Error()
+	}
+	writeJSON(w, http.StatusAccepted, body)
+}
+
 // handleSelfUpgrade replaces the platform binary and restarts the service.
 // The reply is written before the restart so the browser knows the dropped
 // connection is expected; the page then waits for /api/health to answer again.

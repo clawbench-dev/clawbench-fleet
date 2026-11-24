@@ -565,6 +565,33 @@ func (f *Fake) ReplaceSelf(src, dst string) error {
 // dev server would end the session the operator is working in.
 func (f *Fake) RestartSelf(ctx context.Context) error { return nil }
 
+// PortHolders reports a simulated holder for ports a fake unit listens on. The
+// dev server itself is never a systemd unit, so nothing is ever marked Self.
+func (f *Fake) PortHolders(ctx context.Context, port int, username string) ([]PortHolder, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if username != "" {
+		if _, ok := f.users[username]; !ok {
+			return nil, fmt.Errorf("账号 %s 不存在", username)
+		}
+	}
+	for _, u := range f.units {
+		if u.port == port && u.server != nil {
+			return []PortHolder{{PID: os.Getpid()}}, nil
+		}
+	}
+	return nil, nil
+}
+
+// KillProcess is never reached in dev: the only process a fake could report is
+// the dev server itself, and ending it would close the session in progress.
+func (f *Fake) KillProcess(ctx context.Context, pid int) error {
+	if pid == os.Getpid() {
+		return errors.New("不会停掉正在运行这次操作的进程")
+	}
+	return nil
+}
+
 func copySelfFile(src, dst string) error {
 	data, err := os.ReadFile(src)
 	if err != nil {

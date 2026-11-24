@@ -42,6 +42,14 @@ type Listener struct {
 	Cwd  string
 }
 
+// PortHolder is one process listening on a port. Self marks the process the
+// platform is running in right now, which is the one a hand-started deployment
+// leaves behind once the service takes over.
+type PortHolder struct {
+	PID  int
+	Self bool
+}
+
 // SSHStatus is what the platform can learn about the machine's SSH server
 // without changing its configuration. The platform only prepares tenant
 // accounts; whether sshd accepts them is the operator's policy.
@@ -129,6 +137,13 @@ type System interface {
 	// command and returns without waiting for the unit to come back, because
 	// the restarted process is this one.
 	RestartSelf(ctx context.Context) error
+	// PortHolders lists the processes of username listening on port. It labels
+	// the platform's own process so the caller can tell "the service I am about
+	// to start is already mine" from "somebody else is sitting on the port".
+	PortHolders(ctx context.Context, port int, username string) ([]PortHolder, error)
+	// KillProcess ends one process by PID. The platform only uses it on a
+	// process it has just identified as its own, listening on its own port.
+	KillProcess(ctx context.Context, pid int) error
 }
 
 // NpmPlatformPackage maps a wrapper package such as "@scope/clawbench" to the

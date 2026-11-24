@@ -143,4 +143,9 @@ func TestSelfUpgradeEndpoints(t *testing.T) {
 	if status != http.StatusBadRequest {
 		t.Fatalf("dev upload = %d %s", status, body)
 	}
+	// Handing the platform to systemd means the same thing in --dev: there is
+	// no unit to write, so the button has to say so rather than half-do it.
+	if status, body := c.request(http.MethodPost, "/api/upgrades/self/adopt", nil); status != http.StatusBadRequest {
+		t.Fatalf("dev adopt = %d %s", status, body)
+	}
 }

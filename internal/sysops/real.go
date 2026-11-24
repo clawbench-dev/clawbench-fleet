@@ -343,6 +343,82 @@ func (r *Real) StopPortOwner(ctx context.Context, port int, username string) err
 	return fmt.Errorf("端口 %d 上的进程停不下来", port)
 }
 
+// PortHolders lists the processes of username listening on port. The platform
+// itself is usually root, so "owned by username" alone would never match it;
+// the running process is marked instead, which is what lets the caller stop
+// exactly the hand-started instance it is replacing.
+func (r *Real) PortHolders(ctx context.Context, port int, username string) ([]PortHolder, error) {
+	// Port 0 would turn the ss filter into "every listening socket", and the
+	// caller kills what it gets back. A typo in the listen address must not
+	// turn into "stop every server on the machine".
+	if port < 1 || port > 65535 {
+		return nil, fmt.Errorf("端口 %d 不合法，无法判断谁在监听", port)
+	}
+	uid, _, err := r.LookupIDs(ctx, username)
+	if err != nil {
+		return nil, err
+	}
+	out, err := run(ctx, "ss", "-ltnp", fmt.Sprintf("sport = :%d", port))
+	if err != nil {
+		return nil, err
+	}
+	self := os.Getpid()
+	var holders []PortHolder
+	for _, m := range ssPidRe.FindAllStringSubmatch(out, -1) {
+		pid, convErr := strconv.Atoi(m[1])
+		if convErr != nil {
+			continue
+		}
+		if pid != self && !processOwnedBy(pid, uid) {
+			continue
+		}
+		holders = append(holders, PortHolder{PID: pid, Self: pid == self})
+	}
+	return holders, nil
+}
+
+// KillProcess sends SIGTERM and waits a moment before resorting to SIGKILL. The
+// platform uses it only on the process holding its own port, so a graceful stop
+// is what leaves the port free for systemd to bind immediately.
+//
+// A process that has exited but not been reaped yet is a zombie: it no longer
+// holds any port, and signaling 0 still succeeds on it. isZombie is therefore
+// part of "gone", otherwise a stop would always wait out the full grace period.
+func (r *Real) KillProcess(ctx context.Context, pid int) error {
+	if pid <= 0 {
+		return fmt.Errorf("进程号 %d 无效", pid)
+	}
+	if pid == os.Getpid() {
+		return errors.New("不会停掉正在运行这次操作的进程")
+	}
+	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return err
+	}
+	for range 50 {
+		if processGone(pid) {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return err
+	}
+	return nil
+}
+
+// processGone reports whether pid no longer holds anything: it is either off
+// the process table or waiting to be reaped.
+func processGone(pid int) bool {
+	if errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
+		return true
+	}
+	return isZombie(pid)
+}
+
 // waitPortClosed polls until nothing listens on port, at most attempts times.
 func waitPortClosed(ctx context.Context, port, attempts int) error {
 	for range attempts {

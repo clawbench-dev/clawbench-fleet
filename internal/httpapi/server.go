@@ -103,6 +103,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/upgrades/rollback", s.protected(s.handleRollback))
 	s.mux.HandleFunc("GET /api/upgrades/self", s.protected(s.handleSelfInfo))
 	s.mux.HandleFunc("POST /api/upgrades/self", s.protected(s.handleSelfUpgrade))
+	s.mux.HandleFunc("POST /api/upgrades/self/adopt", s.protected(s.handleSelfAdopt))
 
 	s.mux.HandleFunc("GET /api/jobs/{id}", s.protected(s.handleJob))
 	s.mux.HandleFunc("GET /api/jobs/{id}/artifacts/{name}", s.protected(s.handleJobArtifact))

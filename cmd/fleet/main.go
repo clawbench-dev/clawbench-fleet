@@ -55,6 +55,9 @@ func run() error {
 		return err
 	}
 	st, sys, svc := b.store, b.system, b.service
+	// Remember the config file this process was started with: the systemd unit
+	// written by "hand the platform to systemd" has to name the same one.
+	svc.ConfigPath = *configPath
 	defer func() { _ = st.Close() }()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

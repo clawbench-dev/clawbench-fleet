@@ -6,8 +6,12 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strconv"
+	"strings"
 
 	"clawbench-fleet/internal/sysops"
 	"clawbench-fleet/internal/version"
@@ -120,6 +124,159 @@ func (s *Service) UploadSelf(ctx context.Context, r io.Reader, maxBytes int64, a
 			restartErr, sysops.SelfUnit)
 	}
 	return result, nil
+}
+
+// SelfConfigPath is where the platform reads its configuration from by
+// default. The unit written by AdoptSelf names the file this process was
+// actually started with; this constant is only the fallback for callers that
+// do not set Service.ConfigPath.
+const SelfConfigPath = "/etc/clawbench-fleet/config.yaml"
+
+// configFilePath is the config file the running platform was started with.
+func (s *Service) configFilePath() string {
+	if s.ConfigPath != "" {
+		return s.ConfigPath
+	}
+	return SelfConfigPath
+}
+
+// selfServiceContent is the unit file handed to systemd. It mirrors the one the
+// installer ships, with the program's real path filled in: the operator may
+// have built it somewhere else, and a unit naming the wrong file would leave
+// the machine exactly as stuck as a missing unit does.
+func selfServiceContent(binary, configPath string) string {
+	return fmt.Sprintf(`[Unit]
+Description=Clawbench Fleet - multi-tenant Clawbench instance console
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=%s --config %s
+Restart=always
+RestartSec=3
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+`, binary, configPath)
+}
+
+// AdoptSelfResult tells the page what the adoption did and how many processes
+// it stopped. The reply is written before the process goes away, exactly like
+// a self upgrade.
+type AdoptSelfResult struct {
+	ServicePath string `json:"service_path"`
+	ConfigPath  string `json:"config_path"`
+	Stopped     int    `json:"stopped"`
+	Restarting  bool   `json:"restarting"`
+}
+
+// AdoptSelf hands the running platform to systemd.
+//
+// This is for the deployment that was started by hand with nohup: without a
+// unit, nothing restarts it after an upgrade swaps the binary, and the page
+// simply stops answering. Adding the unit is not enough on its own, though —
+// the hand-started process is still holding the port — so it is stopped here.
+// Only the processes actually listening on our port are touched.
+func (s *Service) AdoptSelf(ctx context.Context, ac AuditContext) (*AdoptSelfResult, error) {
+	if s.Sys.Mode() == selfModeDev {
+		return nil, errors.New("开发模式下没有可托管的服务，请在正式部署的服务器上操作")
+	}
+	exe := s.SelfBinary()
+	if exe == "" {
+		return nil, errors.New("找不到当前平台程序的路径，无法托管")
+	}
+	// The unit starts the platform with this file. Handing the service to
+	// systemd when the file is not there would stop the only running copy and
+	// leave nothing to start: the page would simply stop answering.
+	cfgPath := s.configFilePath()
+	if _, statErr := os.Stat(cfgPath); statErr != nil {
+		return nil, fmt.Errorf("找不到配置文件 %s，托管后平台会起不来。"+
+			"请确认启动时的 --config 指向一个存在的文件再操作：%w", cfgPath, statErr)
+	}
+	// Nothing below may leave the platform down: the unit is written and enabled
+	// first, so ending this process is always followed by systemd starting the
+	// same program. The hand-started process holding the port is only stopped
+	// once that safety net is in place.
+	if writeErr := s.Sys.WriteUnit(ctx, sysops.SelfUnit, selfServiceContent(exe, cfgPath)); writeErr != nil {
+		return nil, fmt.Errorf("写入服务定义失败：%w", writeErr)
+	}
+	if reloadErr := s.Sys.DaemonReload(ctx); reloadErr != nil {
+		return nil, fmt.Errorf("服务定义已写入，但 systemd 没有重新加载：%w", reloadErr)
+	}
+	if enableErr := s.Sys.Enable(ctx, sysops.SelfUnit); enableErr != nil {
+		return nil, fmt.Errorf("服务定义已写入，但设置开机自启失败：%w", enableErr)
+	}
+	stopped, stopErr := s.stopHandStartedSelf(ctx)
+	if stopErr != nil {
+		return nil, stopErr
+	}
+	s.Audit(ac, "self.adopt", nil, map[string]any{
+		"binary": exe, "config": cfgPath, "stopped": stopped,
+	}, nil)
+	log.Printf("平台交给 systemd 托管：%s，配置文件 %s，已停掉 %d 个手工启动的进程",
+		exe, cfgPath, stopped)
+
+	result := &AdoptSelfResult{
+		ServicePath: filepath.Join(s.Cfg.System.SystemdDir, sysops.SelfUnit),
+		ConfigPath:  cfgPath,
+		Stopped:     stopped,
+		Restarting:  true,
+	}
+	if restartErr := s.Sys.RestartSelf(ctx); restartErr != nil {
+		return result, fmt.Errorf("服务已经装好，但自动启动失败：%w。请手动执行 systemctl start %s",
+			restartErr, sysops.SelfUnit)
+	}
+	return result, nil
+}
+
+// stopHandStartedSelf ends the processes listening on our own port before
+// systemd starts the same address. The process running this very request is
+// left alone: RestartSelf ends it a moment later, keeping the reply intact.
+func (s *Service) stopHandStartedSelf(ctx context.Context) (int, error) {
+	port, err := listenPort(s.Cfg.Listen)
+	if err != nil {
+		return 0, err
+	}
+	holders, err := s.Sys.PortHolders(ctx, port, runningUser())
+	if err != nil {
+		return 0, fmt.Errorf("查不到端口 %d 上是谁在监听：%w", port, err)
+	}
+	stopped := 0
+	for _, h := range holders {
+		if h.Self {
+			continue
+		}
+		if killErr := s.Sys.KillProcess(ctx, h.PID); killErr != nil {
+			return stopped, fmt.Errorf("停掉占用端口 %d 的旧进程失败：%w", port, killErr)
+		}
+		stopped++
+	}
+	return stopped, nil
+}
+
+// listenPort pulls the port out of a listen address such as "0.0.0.0:30000".
+func listenPort(addr string) (int, error) {
+	_, portStr, err := net.SplitHostPort(strings.TrimSpace(addr))
+	if err != nil {
+		return 0, fmt.Errorf("监听地址 %q 无法解析：%w", addr, err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return 0, fmt.Errorf("监听地址 %q 里的端口不是数字：%w", addr, err)
+	}
+	return port, nil
+}
+
+// runningUser is the account the platform runs under. It decides whose
+// processes count as "ours" when a port has to be freed.
+func runningUser() string {
+	if u, err := user.Current(); err == nil {
+		return u.Username
+	}
+	return "root"
 }
 
 // dirWritable reports whether a temporary file can be created in dir. Testing

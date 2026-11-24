@@ -32,6 +32,8 @@ const selfUploading = ref(false)
 const selfWaiting = ref(false)
 const selfWarning = ref('')
 const confirmSelf = ref(false)
+const adopting = ref(false)
+const confirmAdopt = ref(false)
 let timer = 0
 let selfTimer = 0
 
@@ -73,7 +75,7 @@ function chooseSelfFile(event: Event) {
 
 // waitForSelf 在平台重启期间反复问 /api/health，直到新进程应答为止。
 // 上传请求本身会在进程退出时断开，所以断开之后的完成状态只能靠这里确认。
-function waitForSelf(expected: string) {
+function waitForSelf(expected: string, action: 'upgrade' | 'adopt' = 'upgrade') {
   selfWaiting.value = true
   const deadline = Date.now() + 3 * 60 * 1000
   window.clearInterval(selfTimer)
@@ -86,11 +88,16 @@ function waitForSelf(expected: string) {
         selfWaiting.value = false
         const got = data.version || ''
         if (got.replace(/^v/, '') === expected.replace(/^v/, '')) {
-          toast(`平台已升级到 ${got}，正在刷新页面`, 'success')
+          toast(action === 'adopt'
+            ? `平台已由系统托管并重新上线（版本 ${got}）`
+            : `平台已升级到 ${got}，正在刷新页面`, 'success')
+          window.setTimeout(() => window.location.reload(), 1200)
         } else {
-          toast(`平台已重新上线，但报告的版本是 ${got || '未知'}`, 'error')
+          // 版本对不上，说明系统拉起来的可能是另一份程序。自动刷新会把这条
+          // 提示冲掉，所以留在页面上把话说清楚。
+          selfWarning.value = `平台已重新上线，但报告的版本是 ${got || '未知'}，期望 ${expected}。请核对 systemd 的 ExecStart 是否指向这次运行的程序。`
+          toast(selfWarning.value, 'error')
         }
-        window.setTimeout(() => window.location.reload(), 1200)
       }
     } catch {
       // 服务还没起来，继续等。
@@ -124,6 +131,28 @@ async function uploadSelf() {
   } catch (e) {
     selfUploading.value = false
     toast(errorMessage(e, '上传失败，平台没有改动'), 'error')
+  }
+}
+
+async function adoptSelf() {
+  confirmAdopt.value = false
+  adopting.value = true
+  selfWarning.value = ''
+  try {
+    const res = await api.post<{
+      result: { service_path: string; config_path: string; stopped: number; restarting: boolean }
+      restarting: boolean
+      warning?: string
+    }>('/upgrades/self/adopt')
+    if (res.warning) selfWarning.value = res.warning
+    toast(res.result.stopped > 0
+      ? `服务定义已写入 ${res.result.service_path}，停掉了 ${res.result.stopped} 个手工启动的进程`
+      : `服务定义已写入 ${res.result.service_path}`, 'success')
+    adopting.value = false
+    waitForSelf(selfInfo.value?.version || '', 'adopt')
+  } catch (e) {
+    adopting.value = false
+    toast(errorMessage(e, '交给 systemd 托管失败'), 'error')
   }
 }
 
@@ -452,6 +481,22 @@ function statusText(v: Version): string {
             {{ selfUploading ? '上传并校验中…' : '上传并重启平台' }}
           </button>
         </div>
+        <div class="row small muted-2" style="align-items: flex-start; margin-top: 12px">
+          <span>
+            如果平台是用 nohup 之类手工挂起来的，升级后不会有人把它重新拉起来，页面会一直打不开。点下面的按钮把当前程序交给系统托管：
+            写服务定义、设成开机自启，然后停掉手工启动的进程并重新启动。
+          </span>
+        </div>
+        <div class="form-actions" style="justify-content: flex-start; margin-top: 8px">
+          <button
+            class="btn"
+            type="button"
+            :disabled="adopting || !selfInfo?.supported"
+            @click="confirmAdopt = true"
+          >
+            {{ adopting ? '正在托管中…' : '交给系统托管并重启' }}
+          </button>
+        </div>
       </template>
     </div>
 
@@ -511,6 +556,16 @@ function statusText(v: Version): string {
       danger
       @cancel="confirmSelf = false"
       @confirm="uploadSelf"
+    />
+
+    <ConfirmDialog
+      :open="confirmAdopt"
+      title="交给系统托管"
+      message="会写一份 clawbench-fleet.service 服务定义（程序路径取当前正在运行的这个程序，配置文件沿用启动时的 --config），设成开机自启，然后停掉手工启动的进程并由系统重新启动平台。\n\n期间后台页面会断开几十秒，员工实例完全不受影响。只停掉占用本平台端口的那个进程，不会碰其他程序。"
+      confirm-text="确认托管并重启"
+      danger
+      @cancel="confirmAdopt = false"
+      @confirm="adoptSelf"
     />
 
     <ConfirmDialog
