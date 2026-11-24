@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -432,6 +433,26 @@ func TestGuestPageAndReports(t *testing.T) {
 	}
 	if reportErr := svc.SubmitGuestReport(999, "x", ""); reportErr == nil {
 		t.Fatal("unknown tenant must be rejected")
+	}
+	// The public listing is the admin table's data minus machine internals, so
+	// it carries version/metrics/disk for everyone but still no paths or UIDs.
+	createRunning(t, svc, "bob")
+	page, err = svc.GuestPageFor("", GuestQuery{Query: "bo"})
+	if err != nil || page.Total != 1 || len(page.Items) != 1 || page.Items[0].Username != "bob" {
+		t.Fatalf("filtered guest page = %+v %v", page, err)
+	}
+	page, err = svc.GuestPageFor("", GuestQuery{Page: 1, PageSize: 1})
+	if err != nil || page.Total != 2 || len(page.Items) != 1 {
+		t.Fatalf("paged guest page = %+v %v", page, err)
+	}
+	raw, err := json.Marshal(page.Items[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, leak := range []string{"home_dir", "data_dir", "uid", "gid", "notes", "unit_name", "last_error"} {
+		if strings.Contains(string(raw), leak) {
+			t.Fatalf("guest page leaked %q: %s", leak, raw)
+		}
 	}
 	reports, err := svc.ListGuestReports(true, 10)
 	if err != nil || len(reports) != 1 {

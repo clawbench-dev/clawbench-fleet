@@ -1,33 +1,40 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { AlertTriangle, ExternalLink, Megaphone, RefreshCw, Search, Server, Wrench } from 'lucide-vue-next'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { AlertTriangle, ChevronLeft, ChevronRight, Megaphone, RefreshCw, Search, Server } from 'lucide-vue-next'
 import { api, errorMessage } from '../api'
-import CopyField from '../components/CopyField.vue'
 import Modal from '../components/Modal.vue'
-import StatusBadge from '../components/StatusBadge.vue'
+import TenantTable from '../components/TenantTable.vue'
+import type { Row } from '../components/TenantTable.vue'
 import { toast } from '../stores/toast'
-import type { GuestInstance, GuestPage } from '../types'
+import type { GuestPage } from '../types'
 
 const page = ref<GuestPage | null>(null)
 const loading = ref(true)
 const error = ref('')
 const q = ref('')
+const status = ref('')
+const pageNo = ref(1)
+const pageSize = 20
 
-const reportTarget = ref<GuestInstance | null>(null)
+const reportTarget = ref<Row | null>(null)
 const reportMessage = ref('')
 const submitting = ref(false)
 
 let timer = 0
+let searchTimer = 0
 
-const defaultHelp = `1. 在上面找到自己的名字，点「打开」就能进自己的 Clawbench。
+const defaultHelp = `1. 在上面找到自己的名字，点链接就能进自己的 Clawbench。
 2. 地址也可以复制下来，存到浏览器书签。
-3. 打不开时先看状态：显示「已停止」说明服务被关掉了，点「报障」告诉管理员。
+3. 打不开时先看状态：显示「已停止」说明服务被关掉了，点「打不开？」告诉管理员。
 4. 忘记密码、需要装东西，都找管理员，不要自己乱改服务器。`
 
 async function load(silent = false) {
   if (!silent) loading.value = true
   try {
-    page.value = await api.get<GuestPage>('/public/instances')
+    const params = new URLSearchParams({ page: String(pageNo.value), page_size: String(pageSize) })
+    if (q.value.trim()) params.set('q', q.value.trim())
+    if (status.value) params.set('status', status.value)
+    page.value = await api.get<GuestPage>('/public/instances?' + params.toString())
     error.value = ''
   } catch (e) {
     if (!silent) error.value = errorMessage(e, '加载失败')
@@ -40,25 +47,23 @@ onMounted(() => {
   load()
   timer = window.setInterval(() => load(true), 15000)
 })
-onBeforeUnmount(() => window.clearInterval(timer))
-
-const items = computed(() => page.value?.items || [])
-
-const filtered = computed(() => {
-  const key = q.value.trim().toLowerCase()
-  if (!key) return items.value
-  return items.value.filter((t) => {
-    return (
-      t.username.toLowerCase().includes(key) ||
-      (t.display_name || '').toLowerCase().includes(key) ||
-      String(t.port).includes(key)
-    )
-  })
+onBeforeUnmount(() => {
+  window.clearInterval(timer)
+  window.clearTimeout(searchTimer)
 })
 
-const runningCount = computed(() => items.value.filter((t) => t.status === 'running').length)
+watch([q, status], () => {
+  pageNo.value = 1
+  window.clearTimeout(searchTimer)
+  searchTimer = window.setTimeout(() => load(), 300)
+})
+watch(pageNo, () => load())
 
-function openReport(t: GuestInstance) {
+const items = computed<Row[]>(() => page.value?.items || [])
+const total = computed(() => page.value?.total || 0)
+const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize)))
+
+function openReport(t: Row) {
   reportTarget.value = t
   reportMessage.value = ''
 }
@@ -88,7 +93,7 @@ async function submitReport() {
         <div class="brand-mark"><Server :size="19" /></div>
         <div>
           <div class="guest-title">Clawbench 实例地址</div>
-          <div class="guest-sub">找到自己的名字，点开就能用</div>
+          <div class="guest-sub">找到自己的名字，点链接就能用</div>
         </div>
       </div>
       <button class="btn btn-ghost" type="button" :disabled="loading" @click="load()">
@@ -115,56 +120,50 @@ async function submitReport() {
         <div class="guest-notice-text">{{ page.notice }}</div>
       </div>
 
-      <div class="guest-toolbar">
-        <div class="guest-search">
-          <Search :size="16" />
-          <input v-model="q" class="input" placeholder="搜自己的名字、登录名或端口" />
-        </div>
-        <div class="small muted-2">
-          共 {{ items.length }} 个实例 · {{ runningCount }} 个运行中
+      <div class="card">
+        <div class="row-between" style="flex-wrap: wrap; gap: 12px">
+          <div class="row" style="flex: 1; min-width: 260px">
+            <div style="position: relative; flex: 1">
+              <Search :size="15" style="position: absolute; left: 11px; top: 11px; color: var(--muted-2)" />
+              <input v-model="q" class="input" style="padding-left: 33px" placeholder="搜自己的名字或登录名" />
+            </div>
+            <select v-model="status" class="select" style="width: 140px">
+              <option value="">全部状态</option>
+              <option value="running">运行中</option>
+              <option value="stopped">已停止</option>
+              <option value="error">异常</option>
+              <option value="creating">创建中</option>
+            </select>
+          </div>
+          <div class="small muted-2">共 {{ total }} 个</div>
         </div>
       </div>
 
-      <div v-if="!filtered.length" class="card guest-disabled">
+      <TenantTable
+        v-if="items.length"
+        :items="items"
+        reportable
+        style="margin-top: 12px"
+        @report="openReport"
+      />
+
+      <div v-else-if="!loading" class="card guest-disabled" style="margin-top: 12px">
         <Search :size="20" color="var(--muted-2)" />
         <div>
           <div class="card-title">没找到</div>
-          <div class="card-sub">{{ items.length ? '换个关键词试试，或者问管理员。' : '管理员还没有创建任何实例。' }}</div>
+          <div class="card-sub">{{ total ? '换个关键词试试，或者问管理员。' : '管理员还没有创建任何实例。' }}</div>
         </div>
       </div>
 
-      <div v-else class="guest-grid">
-        <div v-for="t in filtered" :key="t.id" class="card guest-card">
-          <div class="guest-card-head">
-            <div style="min-width: 0">
-              <div class="guest-name">{{ t.display_name || t.username }}</div>
-              <div class="small muted-2 mono">{{ t.username }}</div>
-            </div>
-            <StatusBadge :status="t.status" />
-          </div>
-
-          <div class="guest-port">
-            <span class="small muted-2">端口</span>
-            <span class="guest-port-num">{{ t.port }}</span>
-          </div>
-
-          <CopyField :value="t.address" />
-
-          <div v-if="t.disk_warn" class="guest-warn">
-            <AlertTriangle :size="14" />
-            空间快满了，请清理一下或联系管理员
-          </div>
-
-          <div class="guest-actions">
-            <a class="btn btn-primary btn-sm" :href="t.address" target="_blank" rel="noopener">
-              <ExternalLink :size="14" />
-              打开
-            </a>
-            <button class="btn btn-sm" type="button" @click="openReport(t)">
-              <Wrench :size="14" />
-              打不开？
-            </button>
-          </div>
+      <div v-if="total > pageSize" class="row-between" style="margin-top: 14px">
+        <span class="small muted-2">第 {{ pageNo }} / {{ totalPages }} 页</span>
+        <div class="btn-row">
+          <button class="btn btn-sm" type="button" :disabled="pageNo <= 1" @click="pageNo--">
+            <ChevronLeft :size="14" /> 上一页
+          </button>
+          <button class="btn btn-sm" type="button" :disabled="pageNo >= totalPages" @click="pageNo++">
+            下一页 <ChevronRight :size="14" />
+          </button>
         </div>
       </div>
 

@@ -240,6 +240,11 @@ export interface GuestInstance {
   port: number
   address: string
   status: string
+  version: string
+  metrics: Metrics
+  disk_bytes: number
+  disk_checked_at: string
+  last_active_at: string
   disk_warn: boolean
 }
 
@@ -248,6 +253,9 @@ export interface GuestPage {
   notice: string
   help: string
   items: GuestInstance[]
+  total: number
+  page: number
+  page_size: number
 }
 
 export interface TrashItem extends Tenant {

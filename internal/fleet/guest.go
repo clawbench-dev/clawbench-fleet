@@ -2,77 +2,124 @@ package fleet
 
 import (
 	"errors"
-	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"clawbench-fleet/internal/domain"
+	"clawbench-fleet/internal/store"
 )
 
 var ErrGuestDisabled = errors.New("员工自助页还没有开启")
 
-// GuestInstance is the small slice of a tenant that may be shown to everyone.
-// Keep it minimal: no home directory, no UID, no notes, no metrics.
+// GuestInstance is the slice of a tenant that may be shown to everyone.
+// It mirrors the columns of the admin tenant list minus everything that only
+// makes sense inside the machine: no home directory, no UID/GID, no notes, no
+// systemd unit, no last error.
 type GuestInstance struct {
-	ID          int64  `json:"id"`
-	Username    string `json:"username"`
-	DisplayName string `json:"display_name"`
-	Port        int    `json:"port"`
-	Address     string `json:"address"`
-	Status      string `json:"status"`
-	DiskWarn    bool   `json:"disk_warn"`
+	ID           int64          `json:"id"`
+	Username     string         `json:"username"`
+	DisplayName  string         `json:"display_name"`
+	Port         int            `json:"port"`
+	Address      string         `json:"address"`
+	Status       string         `json:"status"`
+	Version      string         `json:"version"`
+	Metrics      domain.Metrics `json:"metrics"`
+	DiskBytes    int64          `json:"disk_bytes"`
+	DiskChecked  string         `json:"disk_checked_at"`
+	LastActiveAt string         `json:"last_active_at"`
+	DiskWarn     bool           `json:"disk_warn"`
 }
 
 type GuestPage struct {
-	Enabled bool            `json:"enabled"`
-	Notice  string          `json:"notice"`
-	Help    string          `json:"help"`
-	Items   []GuestInstance `json:"items"`
+	Enabled  bool            `json:"enabled"`
+	Notice   string          `json:"notice"`
+	Help     string          `json:"help"`
+	Items    []GuestInstance `json:"items"`
+	Total    int             `json:"total"`
+	Page     int             `json:"page"`
+	PageSize int             `json:"page_size"`
+}
+
+// GuestQuery is what the public page may filter on. It is a subset of the
+// admin listing so the same table can be driven by either endpoint.
+type GuestQuery struct {
+	Query    string
+	Status   string
+	Page     int
+	PageSize int
 }
 
 func (s *Service) GuestPage() (*GuestPage, error) {
-	return s.GuestPageFor("")
+	return s.GuestPageFor("", GuestQuery{})
 }
 
 // GuestPageFor is GuestPage with the visitor's browser host used to build the
 // instance addresses.
-func (s *Service) GuestPageFor(browserHost string) (*GuestPage, error) {
+func (s *Service) GuestPageFor(browserHost string, q GuestQuery) (*GuestPage, error) {
+	if q.Page < 1 {
+		q.Page = 1
+	}
+	if q.PageSize < 1 {
+		q.PageSize = 20
+	}
+	if q.PageSize > 200 {
+		q.PageSize = 200
+	}
 	st := s.Settings()
 	page := &GuestPage{
-		Enabled: st.GuestEnabled,
-		Notice:  st.GuestNotice,
-		Help:    st.GuestHelp,
-		Items:   []GuestInstance{},
+		Enabled:  st.GuestEnabled,
+		Notice:   st.GuestNotice,
+		Help:     st.GuestHelp,
+		Items:    []GuestInstance{},
+		Page:     q.Page,
+		PageSize: q.PageSize,
 	}
 	if !st.GuestEnabled {
 		return page, nil
 	}
-	all, err := s.allTenants()
+	// Trashed and half-deleted instances are not something an employee can
+	// open, so they must never appear on the public page. The store already
+	// drops trashed rows unless asked for them; deleting ones are skipped below.
+	items, total, err := s.Store.ListTenants(store.TenantFilter{
+		Query:    q.Query,
+		Status:   q.Status,
+		Page:     q.Page,
+		PageSize: q.PageSize,
+	})
 	if err != nil {
 		return nil, err
 	}
 	diskLimit := int64(st.DiskWarnGB) * 1024 * 1024 * 1024
-	for _, t := range all {
-		// A trashed or half-deleted instance is not something an employee can
-		// open, so it must not appear on the public page.
-		if t.Status == domain.StatusTrashed || t.Status == domain.StatusDeleting {
+	for _, t := range items {
+		if t.Status == domain.StatusDeleting {
+			total--
 			continue
 		}
-		page.Items = append(page.Items, GuestInstance{
-			ID:          t.ID,
-			Username:    t.Username,
-			DisplayName: t.DisplayName,
-			Port:        t.Port,
-			Address:     s.AddressFor(t, browserHost),
-			Status:      t.Status,
-			DiskWarn:    diskLimit > 0 && t.DiskBytes >= diskLimit,
-		})
+		page.Items = append(page.Items, s.guestInstance(t, browserHost, diskLimit))
 	}
-	sort.Slice(page.Items, func(i, j int) bool {
-		return page.Items[i].Username < page.Items[j].Username
-	})
+	page.Total = total
+	if page.Total < 0 {
+		page.Total = 0
+	}
 	return page, nil
+}
+
+func (s *Service) guestInstance(t domain.Tenant, browserHost string, diskLimit int64) GuestInstance {
+	return GuestInstance{
+		ID:           t.ID,
+		Username:     t.Username,
+		DisplayName:  t.DisplayName,
+		Port:         t.Port,
+		Address:      s.AddressFor(t, browserHost),
+		Status:       t.Status,
+		Version:      t.Version,
+		Metrics:      s.GetMetrics(t.ID),
+		DiskBytes:    t.DiskBytes,
+		DiskChecked:  t.DiskChecked,
+		LastActiveAt: t.LastActiveAt,
+		DiskWarn:     diskLimit > 0 && t.DiskBytes >= diskLimit,
+	}
 }
 
 // SubmitGuestReport records a "my instance won't open" note. Duplicate clicks

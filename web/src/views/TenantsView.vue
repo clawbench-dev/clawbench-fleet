@@ -19,10 +19,9 @@ import { downloadFile } from '../api'
 import { api, errorMessage } from '../api'
 import EmptyState from '../components/EmptyState.vue'
 import Modal from '../components/Modal.vue'
-import StatusBadge from '../components/StatusBadge.vue'
+import TenantTable from '../components/TenantTable.vue'
 import { toast } from '../stores/toast'
 import type { AdoptCandidate, Job, Page, Tenant } from '../types'
-import { formatAgo, formatBytes, formatPercent, formatTime } from '../utils'
 
 const items = ref<Tenant[]>([])
 const total = ref(0)
@@ -472,66 +471,39 @@ function scanStatus(c: AdoptCandidate) {
       </template>
     </Modal>
 
-    <div v-if="items.length" class="table-wrap" style="margin-top: 12px">
-      <table class="table">
-        <thead>
-          <tr>
-            <th style="width: 36px"><input class="checkbox" type="checkbox" :checked="allChecked" @change="toggleAll" /></th>
-            <th>租户</th>
-            <th>访问地址</th>
-            <th>状态</th>
-            <th>版本</th>
-            <th>CPU</th>
-            <th>内存</th>
-            <th>磁盘</th>
-            <th>最近活跃</th>
-            <th style="text-align: right">操作</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="t in items" :key="t.id">
-            <td><input class="checkbox" type="checkbox" :checked="selected.includes(t.id)" @change="toggle(t.id)" /></td>
-            <td>
-              <router-link :to="`/tenants/${t.id}`" class="mono">{{ t.username }}</router-link>
-              <div class="small muted-2">{{ t.display_name || '—' }}</div>
-            </td>
-            <td><a class="mono small" :href="t.address" target="_blank" rel="noreferrer">{{ t.address }}</a></td>
-            <td><StatusBadge :status="t.status" /></td>
-            <td class="mono small">{{ t.version || '—' }}</td>
-            <td class="num small">{{ formatPercent(t.metrics?.cpu_percent || 0) }}</td>
-            <td class="num small">{{ formatBytes(t.metrics?.memory_bytes || 0) }}</td>
-            <td class="num small">{{ t.disk_checked_at ? formatBytes(t.disk_bytes || 0) : '未统计' }}</td>
-            <td class="small" :title="'最近一次对话：' + formatTime(t.last_active_at)">{{ formatAgo(t.last_active_at) }}</td>
-            <td>
-              <div class="actions">
-                <button
-                  v-if="t.status === 'running'"
-                  class="btn btn-ghost btn-sm btn-icon"
-                  type="button"
-                  title="停止"
-                  @click="act(t, 'stop')"
-                >
-                  <Square :size="14" />
-                </button>
-                <button
-                  v-else
-                  class="btn btn-ghost btn-sm btn-icon"
-                  type="button"
-                  title="启动"
-                  @click="act(t, 'start')"
-                >
-                  <Play :size="14" />
-                </button>
-                <button class="btn btn-ghost btn-sm btn-icon" type="button" title="重启" @click="act(t, 'restart')">
-                  <RotateCw :size="14" />
-                </button>
-                <router-link class="btn btn-sm" :to="`/tenants/${t.id}`">详情</router-link>
-              </div>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
+    <TenantTable
+      v-if="items.length"
+      :items="items"
+      admin
+      :selected="selected"
+      style="margin-top: 12px"
+      @toggle="toggle"
+      @toggle-all="toggleAll"
+    >
+      <template #actions="{ row: t }">
+        <button
+          v-if="t.status === 'running'"
+          class="btn btn-ghost btn-sm btn-icon"
+          type="button"
+          title="停止"
+          @click="act(t as Tenant, 'stop')"
+        >
+          <Square :size="14" />
+        </button>
+        <button
+          v-else
+          class="btn btn-ghost btn-sm btn-icon"
+          type="button"
+          title="启动"
+          @click="act(t as Tenant, 'start')"
+        >
+          <Play :size="14" />
+        </button>
+        <button class="btn btn-ghost btn-sm btn-icon" type="button" title="重启" @click="act(t as Tenant, 'restart')">
+          <RotateCw :size="14" />
+        </button>
+      </template>
+    </TenantTable>
 
     <div v-else-if="!loading" style="margin-top: 12px">
       <EmptyState title="没有找到租户" hint="换个搜索词，或者创建第一个实例。">
