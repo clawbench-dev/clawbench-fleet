@@ -777,7 +777,7 @@ func portListening(port int) bool {
 // it from the platform's version directory, so that directory has to exist
 // first. Dev mode simulates the binary and is always ready.
 func (s *Service) clawbenchBinaryReady() bool {
-	if s.Sys.Mode() == "dev" {
+	if s.Sys.Mode() == modeDev {
 		return true
 	}
 	_, err := os.Stat(filepath.Join(s.Cfg.Clawbench.InstallDir, "current", "clawbench"))

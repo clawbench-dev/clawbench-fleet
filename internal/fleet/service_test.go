@@ -117,10 +117,15 @@ func TestTenantLifecycle(t *testing.T) {
 		t.Fatalf("read unit: %v", err)
 	}
 	unit := string(unitData)
-	for _, want := range []string{"User=alice", "--managed", "--port " + strconv.Itoa(tenant.Port), "CPUQuota=200%", "MemoryMax=4G"} {
+	for _, want := range []string{"User=alice", "--port " + strconv.Itoa(tenant.Port), "CPUQuota=200%", "MemoryMax=4G"} {
 		if !strings.Contains(unit, want) {
 			t.Fatalf("unit missing %q:\n%s", want, unit)
 		}
+	}
+	// --managed would also hide the in-app restart, which tenants are allowed
+	// to use: systemd brings the process back either way.
+	if strings.Contains(unit, "--managed") {
+		t.Fatalf("unit must not pass --managed:\n%s", unit)
 	}
 
 	if info, err := svc.healthCheck(ctx, tenant.Port); err != nil || info.App != "clawbench" {

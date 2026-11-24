@@ -19,6 +19,10 @@ const (
 
 	auditTenantUpdate = "tenant.update"
 
+	// modeDev is the simulated backend's mode string. Several flows behave
+	// differently when nothing real is installed.
+	modeDev = "dev"
+
 	// bulkResetPasswordAction resets passwords for a whole selection and puts
 	// the new ones in a downloadable file.
 	bulkResetPasswordAction = "reset-password"

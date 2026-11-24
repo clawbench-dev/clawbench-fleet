@@ -178,6 +178,30 @@ func TestCommandError(t *testing.T) {
 	}
 }
 
+func TestIgnoreMissingUnit(t *testing.T) {
+	missing := &CommandError{
+		Name:   "systemctl",
+		Args:   []string{"stop", "clawbench-alice.service"},
+		Stderr: "Failed to stop clawbench-alice.service: Unit clawbench-alice.service not loaded.\n",
+		Err:    errors.New("exit status 5"),
+	}
+	if err := ignoreMissingUnit(missing); err != nil {
+		t.Fatalf("missing unit should be ignored, got %v", err)
+	}
+	denied := &CommandError{
+		Name:   "systemctl",
+		Args:   []string{"stop", "clawbench-alice.service"},
+		Stderr: "Failed to stop clawbench-alice.service: Access denied\n",
+		Err:    errors.New("exit status 1"),
+	}
+	if err := ignoreMissingUnit(denied); err == nil {
+		t.Fatal("a real failure must still surface")
+	}
+	if err := ignoreMissingUnit(nil); err != nil {
+		t.Fatalf("nil = %v", err)
+	}
+}
+
 func TestRunCapturesOutput(t *testing.T) {
 	out, err := runWithin(context.Background(), shortTimeout, "sh", "-c", "echo hello")
 	if err != nil || strings.TrimSpace(out) != "hello" {

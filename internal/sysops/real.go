@@ -543,7 +543,7 @@ func (r *Real) Enable(ctx context.Context, unit string) error {
 
 func (r *Real) Disable(ctx context.Context, unit string) error {
 	_, err := run(ctx, "systemctl", "disable", unit)
-	return err
+	return ignoreMissingUnit(err)
 }
 
 func (r *Real) Start(ctx context.Context, unit string) error {
@@ -553,6 +553,17 @@ func (r *Real) Start(ctx context.Context, unit string) error {
 
 func (r *Real) Stop(ctx context.Context, unit string) error {
 	_, err := run(ctx, "systemctl", "stop", unit)
+	return ignoreMissingUnit(err)
+}
+
+// ignoreMissingUnit treats "this unit is not loaded" as success. systemd says so
+// when the unit file is already gone, which is exactly the state we want after
+// stopping or disabling it, so failing there would block the rest of the work.
+func ignoreMissingUnit(err error) error {
+	var cmdErr *CommandError
+	if errors.As(err, &cmdErr) && strings.Contains(cmdErr.Stderr, "not loaded") {
+		return nil
+	}
 	return err
 }
 

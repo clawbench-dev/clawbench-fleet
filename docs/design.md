@@ -601,7 +601,7 @@ Group=<username>
 WorkingDirectory=/home/<username>
 Environment=HOME=/home/<username>
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
-ExecStart=/opt/clawbench-fleet/current/clawbench --port <port> --data-dir /home/<username>/.clawbench --managed
+ExecStart=/opt/clawbench-fleet/current/clawbench --port <port> --data-dir /home/<username>/.clawbench
 Restart=always
 RestartSec=3
 TimeoutStopSec=30
@@ -617,7 +617,7 @@ WantedBy=multi-user.target
 
 说明：
 
-- `--managed` 关闭实例自己的升级和重启接口，防止员工绕过平台换二进制。
+- 不传 `--managed`，员工可以在实例里自己重启；systemd 的 `Restart=always` 会把它重新拉起来。实例内升级会因为程序目录不可写而直接报错，版本升级统一走平台的升级中心。
 - `--port` 覆盖配置文件里的端口，员工改配置也改不了对外端口。
 - 不设置 `PrivateTmp`、`ProtectHome` 等会影响终端和工具运行的选项。
 - 资源限制用 systemd 的 cgroup 能力；需要 cgroup v2（Ubuntu 22.04+/Debian 12+ 默认满足）。
@@ -1159,7 +1159,6 @@ tls:
 |---|---|
 | `--port` 覆盖配置端口 | 保证员工改配置也改不了对外端口 |
 | `--data-dir` 指定数据目录 | 每个租户一个目录，避免实例锁冲突 |
-| `--managed` | 关闭实例自升级和自重启 |
 | `GET /api/health` | 公开，返回 `app=clawbench`、`version`、`protocol`、`pid` |
 | 配置路径 `<data-dir>/config/config.yaml` | 平台写端口、密码、端口转发开关 |
 | 密码格式 `sha256:<hex>` | 哈希算法 `sha256(密码 + "clawbench-salt")` |
