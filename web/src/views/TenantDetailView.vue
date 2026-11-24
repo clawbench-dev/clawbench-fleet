@@ -463,7 +463,37 @@ function download(backup: Backup) {
     <div class="row"><AlertTriangle :size="18" color="var(--red)" /> {{ error }}</div>
   </div>
 
-  <div v-else-if="loading && !tenant" class="muted">加载中…</div>
+  <div v-else-if="loading && !tenant">
+    <LoadingState text="正在读取这个实例的信息…" />
+
+    <div class="card" style="margin-top: 14px">
+      <div class="row-between" style="flex-wrap: wrap; gap: 14px">
+        <div style="min-width: 240px">
+          <div class="skeleton" style="width: 180px; height: 26px" />
+          <div class="skeleton" style="width: 140px; height: 13px; margin-top: 10px" />
+        </div>
+        <div class="row" style="gap: 8px; flex-wrap: wrap">
+          <div v-for="n in 4" :key="n" class="skeleton" style="width: 78px; height: 32px" />
+        </div>
+      </div>
+      <div class="skeleton" style="width: 100%; max-width: 520px; height: 38px; margin-top: 18px" />
+    </div>
+
+    <div class="grid grid-2" style="margin-top: 14px">
+      <div v-for="n in 2" :key="n" class="card">
+        <div class="skeleton" style="width: 110px; height: 16px" />
+        <div class="skeleton" style="width: 100%; height: 12px; margin-top: 14px" />
+        <div class="skeleton" style="width: 80%; height: 12px; margin-top: 10px" />
+        <div class="skeleton" style="width: 60%; height: 12px; margin-top: 10px" />
+      </div>
+    </div>
+
+    <div class="card" style="margin-top: 14px">
+      <div class="skeleton" style="width: 90px; height: 16px" />
+      <div class="skeleton" style="width: 100%; height: 12px; margin-top: 14px" />
+      <div class="skeleton" style="width: 70%; height: 12px; margin-top: 10px" />
+    </div>
+  </div>
 
   <div v-else-if="tenant">
     <div class="card">
