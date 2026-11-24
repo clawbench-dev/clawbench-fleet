@@ -218,7 +218,7 @@ func TestIntegrationTenantLifecycle(t *testing.T) {
 		Total int `json:"total"`
 	}
 	p.expect(http.MethodGet, "/api/tenants?page=1&page_size=10", nil, http.StatusOK, &list)
-	if list.Total != 1 || list.Items[0].Username != "alice" || !strings.HasPrefix(list.Items[0].Address, "http://") {
+	if list.Total != 1 || list.Items[0].Username != "alice" || !strings.HasPrefix(list.Items[0].Address, "https://") {
 		t.Fatalf("list = %+v", list)
 	}
 

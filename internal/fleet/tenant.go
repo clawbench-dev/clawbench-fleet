@@ -1156,6 +1156,9 @@ func (s *Service) PurgeTenant(ctx context.Context, id int64, ac AuditContext) er
 	if err := s.Store.ReleasePorts(t.ID); err != nil {
 		return err
 	}
+	// The samples have no foreign key, so nothing removes them for us and they
+	// would outlive the tenant until the retention window ends.
+	_ = s.Store.PurgeMetricSamplesForTenant(t.ID)
 	s.Audit(ac, "tenant.purge", t, nil, nil)
 	return nil
 }

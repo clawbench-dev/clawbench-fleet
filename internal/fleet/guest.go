@@ -66,6 +66,18 @@ func (s *Service) GuestPageFor(browserHost string, q GuestQuery) (*GuestPage, er
 	if q.PageSize > 200 {
 		q.PageSize = 200
 	}
+	// A huge page number would overflow the offset arithmetic and quietly fall
+	// back to the first page, which looks like a working (but wrong) answer.
+	if q.Page > 10000 {
+		q.Page = 10000
+	}
+	switch q.Status {
+	case domain.StatusRunning, domain.StatusStopped, domain.StatusError:
+	default:
+		// The public page only offers these three filters; anything else is
+		// either internal (deleting, trashed) or a typo.
+		q.Status = ""
+	}
 	st := s.Settings()
 	page := &GuestPage{
 		Enabled:  st.GuestEnabled,
@@ -78,30 +90,25 @@ func (s *Service) GuestPageFor(browserHost string, q GuestQuery) (*GuestPage, er
 	if !st.GuestEnabled {
 		return page, nil
 	}
-	// Trashed and half-deleted instances are not something an employee can
-	// open, so they must never appear on the public page. The store already
-	// drops trashed rows unless asked for them; deleting ones are skipped below.
+	// Half-deleted instances are filtered in SQL so they neither show up nor
+	// occupy a slot on the page; notes are left out of the search because they
+	// are the admin's internal bookkeeping.
 	items, total, err := s.Store.ListTenants(store.TenantFilter{
-		Query:    q.Query,
-		Status:   q.Status,
-		Page:     q.Page,
-		PageSize: q.PageSize,
+		Query:        q.Query,
+		Status:       q.Status,
+		Page:         q.Page,
+		PageSize:     q.PageSize,
+		HideDeleting: true,
+		SkipNotes:    true,
 	})
 	if err != nil {
 		return nil, err
 	}
 	diskLimit := int64(st.DiskWarnGB) * 1024 * 1024 * 1024
 	for _, t := range items {
-		if t.Status == domain.StatusDeleting {
-			total--
-			continue
-		}
 		page.Items = append(page.Items, s.guestInstance(t, browserHost, diskLimit))
 	}
 	page.Total = total
-	if page.Total < 0 {
-		page.Total = 0
-	}
 	return page, nil
 }
 

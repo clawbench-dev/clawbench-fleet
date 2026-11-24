@@ -240,8 +240,23 @@ func (s *Service) CertInfo() CertInfo {
 // the escape hatch for an expired certificate or a server whose addresses
 // changed since the pair was created.
 func (s *Service) RegenerateCertificate() (string, error) {
-	if err := os.RemoveAll(s.CertDir()); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return "", fmt.Errorf("清理旧证书 %s: %w", s.CertDir(), err)
+	dir := s.CertDir()
+	old := dir + ".old"
+	_ = os.RemoveAll(old)
+	// Move the old pair aside instead of deleting it: if generating a new one
+	// fails (disk full, permissions), every instance would otherwise be left
+	// pointing at an empty directory and refuse to start.
+	if err := os.Rename(dir, old); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("移走旧证书 %s: %w", dir, err)
 	}
-	return s.EnsureCertificate()
+	path, err := s.EnsureCertificate()
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		if renameErr := os.Rename(old, dir); renameErr != nil {
+			return "", fmt.Errorf("生成新证书失败（%w），旧证书也放不回去了：%w", err, renameErr)
+		}
+		return "", err
+	}
+	_ = os.RemoveAll(old)
+	return path, nil
 }

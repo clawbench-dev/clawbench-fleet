@@ -35,6 +35,37 @@ func freePort(t *testing.T) int {
 	return port
 }
 
+// freePortRun returns the first of two consecutive free ports. The test config
+// hands out a range of two, and a range that straddles an occupied port makes
+// the simulated instance fail to bind for reasons unrelated to the test.
+func freePortRun(t *testing.T, n int) int {
+	t.Helper()
+	for range 30 {
+		base := freePort(t)
+		if base+n-1 > 65535 {
+			continue
+		}
+		held := make([]net.Listener, 0, n-1)
+		free := true
+		for p := base + 1; p < base+n; p++ {
+			ln, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(p))
+			if err != nil {
+				free = false
+				break
+			}
+			held = append(held, ln)
+		}
+		for _, ln := range held {
+			_ = ln.Close()
+		}
+		if free {
+			return base
+		}
+	}
+	t.Fatal("找不到连续的空闲端口")
+	return 0
+}
+
 func newTestService(t *testing.T) (*Service, config.Config) {
 	t.Helper()
 	return newTestServiceWith(t, nil)
@@ -48,7 +79,7 @@ func newTestServiceWith(t *testing.T, wrap func(sysops.System) sysops.System) (*
 	cfg := config.Default()
 	cfg.DataDir = filepath.Join(dir, "data")
 	cfg.Clawbench.InstallDir = filepath.Join(dir, "opt")
-	port := freePort(t)
+	port := freePortRun(t, 2)
 	cfg.Clawbench.PortStart = port
 	cfg.Clawbench.PortEnd = port + 1
 	cfg.Clawbench.PortsPerTenant = 1
@@ -237,8 +268,16 @@ func TestTenantLifecycle(t *testing.T) {
 	if _, err := svc.DeleteTenant(ctx, tenant.ID, "alice", ac); err != nil {
 		t.Fatalf("delete again: %v", err)
 	}
+	// Usage history has no foreign key, so purging the tenant has to remove it.
+	at := time.Now().Format(time.RFC3339)
+	if err := svc.Store.AddMetricSample(tenant.ID, domain.MetricSample{At: at, CPUPercent: 1}); err != nil {
+		t.Fatal(err)
+	}
 	if err := svc.PurgeTenant(ctx, tenant.ID, ac); err != nil {
 		t.Fatalf("purge: %v", err)
+	}
+	if samples, err := svc.Store.MetricHistory(tenant.ID, time.Now().Add(-time.Hour), 10); err != nil || len(samples) != 0 {
+		t.Fatalf("metric samples outlived the tenant: %+v %v", samples, err)
 	}
 	if _, svc := svc.GetTenant(tenant.ID); svc == nil {
 		t.Fatal("tenant still exists after purge")

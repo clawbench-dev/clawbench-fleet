@@ -689,10 +689,15 @@ WantedBy=multi-user.target
 | POST | `/api/tenants/{id}/stop` | 停止 |
 | POST | `/api/tenants/{id}/restart` | 重启 |
 | POST | `/api/tenants/{id}/reset-password` | 重置密码，返回一次性新密码 |
+| POST | `/api/tenants/{id}/ssh` | 开/关该租户的 SSH，body：`{enabled}` |
+| GET | `/api/ssh/status` | 本机 sshd 是否安装、运行、允许密码登录 |
 | GET | `/api/tenants/{id}/logs` | 日志，`lines` 参数 |
 | GET | `/api/tenants/{id}/metrics` | CPU/内存/进程数/磁盘缓存 |
+| GET | `/api/tenants/{id}/metrics/history` | 用量历史，`range=24h\|7d` |
+| POST | `/api/tenants/{id}/disk/refresh` | 立即统计该租户磁盘占用 |
+| POST | `/api/tenants/{id}/apply-config` | 把统一配置重新下发到该租户 |
 | POST | `/api/tenants/{id}/repair` | 重写配置和 systemd 单元并重启 |
-| POST | `/api/tenants/bulk` | 批量操作，body：`{action, ids}` |
+| POST | `/api/tenants/bulk` | 批量操作，body：`{action, ids}`；action 含 start/stop/restart/quota/reset-password |
 | GET | `/api/tenants/scan` | 扫描本机已有实例，返回可纳管的账号列表，不落库 |
 | POST | `/api/tenants/adopt` | 纳管已有实例，body：`{usernames: []}`，返回后台任务，按任务项查看逐个结果 |
 | POST | `/api/tenants/import/preview` | 上传 CSV 预览，不落库 |
@@ -728,6 +733,7 @@ WantedBy=multi-user.target
 | POST | `/api/upgrades/rollback` | 回滚到上一版 |
 | GET | `/api/upgrades/self` | 平台自身版本、程序路径、是否支持自升级 |
 | POST | `/api/upgrades/self` | 上传平台二进制（multipart），替换并重启平台服务 |
+| POST | `/api/upgrades/self/adopt` | 把手工启动（nohup）的平台写进 systemd、设成开机自启、停掉旧进程并重启；要求配置文件在 `/etc/clawbench-fleet/config.yaml` |
 
 ### 10.7 任务、审计、设置
 
@@ -737,7 +743,11 @@ WantedBy=multi-user.target
 | GET | `/api/audit` | 审计列表，支持筛选和分页 |
 | GET | `/api/settings` | 平台设置 |
 | PATCH | `/api/settings` | 修改设置 |
+| PUT | `/api/settings/tenant-config` | 保存统一下发到各实例的配置片段 |
+| POST | `/api/settings/apply-config` | 把统一配置下发到所有实例，返回后台任务 |
 | POST | `/api/settings/apply-quota` | 把当前默认资源上限下发到所有实例，返回后台任务 |
+| GET | `/api/settings/cert` | 实例 HTTPS 证书状态（是否存在、覆盖哪些地址、到期时间） |
+| POST | `/api/settings/cert/regenerate` | 重新生成自签证书，失败时保留旧证书 |
 | GET | `/api/health` | 平台自身健康检查（公开） |
 
 ---

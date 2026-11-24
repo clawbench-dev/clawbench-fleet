@@ -62,6 +62,29 @@ func itoa(id int64) string {
 	return strconv.FormatInt(id, 10)
 }
 
+// waitForJobDone blocks until a background job stops running. Tests that fire
+// a bulk action and return immediately leave it writing into the temp dir while
+// the test's cleanup is deleting it.
+func waitForJobDone(t *testing.T, c *client, id int64) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		var out struct {
+			Job struct {
+				Status string `json:"status"`
+			} `json:"job"`
+		}
+		if code := c.json(http.MethodGet, "/api/jobs/"+itoa(id), nil, &out); code == http.StatusOK {
+			switch out.Job.Status {
+			case domain.JobSucceeded, domain.JobFailed, domain.JobPartial:
+				return
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("job %d never finished", id)
+}
+
 func TestTenantSSHOverHTTP(t *testing.T) {
 	c, _ := newTestClient(t)
 	created := createTenant(t, c, "sshusr")
@@ -433,7 +456,10 @@ func TestSettingsAndOverview(t *testing.T) {
 		t.Fatalf("invalid settings = %d", status)
 	}
 
-	createTenant(t, c, "alice")
+	created := createTenant(t, c, "alice")
+	// The tenant.create audit entry is written when provisioning finishes, so
+	// the audit query below has to wait for the instance to be running.
+	waitForStatus(t, c, tenantID(t, created))
 	var overview struct {
 		Total   int              `json:"total"`
 		Counts  map[string]int   `json:"counts"`
@@ -712,6 +738,7 @@ func TestBulkQuotaAndResetOverHTTP(t *testing.T) {
 	}, &quota); code != http.StatusAccepted {
 		t.Fatalf("bulk quota = %d", code)
 	}
+	waitForJobDone(t, c, quota.Job.ID)
 	var reset struct {
 		Job struct {
 			ID int64 `json:"id"`
@@ -722,6 +749,7 @@ func TestBulkQuotaAndResetOverHTTP(t *testing.T) {
 	}, &reset); code != http.StatusAccepted {
 		t.Fatalf("bulk reset = %d", code)
 	}
+	waitForJobDone(t, c, reset.Job.ID)
 	if code := c.json(http.MethodPost, "/api/tenants/bulk", map[string]any{
 		"action": "quota", "ids": ids, "cpu_quota": "bad", "memory_max": "3G", "tasks_max": 128,
 	}, nil); code != http.StatusBadRequest {

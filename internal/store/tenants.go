@@ -86,6 +86,12 @@ type TenantFilter struct {
 	Page           int
 	PageSize       int
 	IncludeTrashed bool
+	// HideDeleting drops rows that are on their way out. The public page uses
+	// it so a half-deleted instance neither shows up nor eats a page slot.
+	HideDeleting bool
+	// SkipNotes keeps the search on username and display name. Notes are the
+	// admin's own bookkeeping and must not be searchable from a public page.
+	SkipNotes bool
 }
 
 func (s *Store) ListTenants(f TenantFilter) ([]domain.Tenant, int, error) {
@@ -103,14 +109,32 @@ func (s *Store) ListTenants(f TenantFilter) ([]domain.Tenant, int, error) {
 	if f.Status != "" {
 		where = append(where, "status=?")
 		args = append(args, f.Status)
-	} else if !f.IncludeTrashed {
-		where = append(where, "status<>?")
-		args = append(args, domain.StatusTrashed)
+	} else {
+		hidden := []string{}
+		if !f.IncludeTrashed {
+			hidden = append(hidden, domain.StatusTrashed)
+		}
+		if f.HideDeleting {
+			hidden = append(hidden, domain.StatusDeleting)
+		}
+		if len(hidden) == 1 {
+			where = append(where, "status<>?")
+			args = append(args, hidden[0])
+		} else if len(hidden) > 1 {
+			where = append(where, "status NOT IN (?,?)")
+			args = append(args, hidden[0], hidden[1])
+		}
 	}
 	if q := strings.TrimSpace(f.Query); q != "" {
-		where = append(where, "(username LIKE ? OR display_name LIKE ? OR notes LIKE ?)")
-		like := "%" + q + "%"
-		args = append(args, like, like, like)
+		if f.SkipNotes {
+			where = append(where, "(username LIKE ? OR display_name LIKE ?)")
+			like := "%" + q + "%"
+			args = append(args, like, like)
+		} else {
+			where = append(where, "(username LIKE ? OR display_name LIKE ? OR notes LIKE ?)")
+			like := "%" + q + "%"
+			args = append(args, like, like, like)
+		}
 	}
 	clause := strings.Join(where, " AND ")
 
