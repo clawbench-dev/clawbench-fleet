@@ -23,19 +23,12 @@ import (
 // 记到平台的 tenants.last_active_at 上。整个过程是只读的：数据库以只读方式打开，
 // 不写任何东西，也不会因为读失败而影响实例运行。
 
-// 最近活跃时间的四个来源，按“离现在最近”取最大值：
-//   - chat_history：每条对话消息的时间，最基本的依据；
-//   - chat_tool_calls：工具调用的时间，比消息时间更靠后，能反映一次还在进行的对话；
-//   - chat_metadata：每条消息的元数据（模型、耗时、花费），相当于“这条消息真的跑完了”；
-//   - chat_sessions：会话的最后更新时间，兜底。
+// 只看最新一条对话消息的时间，这是“最近一次真正有人用”最直接的依据。会话表
+// 的更新时间不算：它只在改标题、归档这类操作时动，一个人连续聊两小时可能一动不动。
+// 归档的会话也不特殊处理，里面的消息照样算，归档本身就是一次访问。
 //
-// 这几张表在老版本里不一定存在，查询失败就跳过，不影响其他来源。
-var activityQueries = []string{
-	`SELECT MAX(created_at) FROM chat_history`,
-	`SELECT MAX(created_at) FROM chat_tool_calls`,
-	`SELECT MAX(created_at) FROM chat_metadata`,
-	`SELECT MAX(updated_at) FROM chat_sessions WHERE removed=0`,
-}
+// 老版本的表结构可能不同，读失败就当这个实例没有记录，不影响其他实例。
+const activityQuery = `SELECT MAX(created_at) FROM chat_history`
 
 // 实例数据库可能存的几种时间写法，见 clawbenchTimeLayouts。
 var clawbenchTimeLayouts = []string{
@@ -93,20 +86,13 @@ func (s *Service) tenantLastActive(ctx context.Context, t domain.Tenant) (messag
 	defer func() { _ = db.Close() }()
 	db.SetMaxOpenConns(1)
 
-	var newest messageTime
-	for _, query := range activityQueries {
-		queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		var raw sql.NullString
-		err := db.QueryRowContext(queryCtx, query).Scan(&raw)
-		cancel()
-		if err != nil || !raw.Valid {
-			continue
-		}
-		if parsed := parseClawbenchTime(raw.String); parsed.ok && parsed.at.After(newest.at) {
-			newest = parsed
-		}
+	var raw sql.NullString
+	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := db.QueryRowContext(queryCtx, activityQuery).Scan(&raw); err != nil || !raw.Valid {
+		return messageTime{}, true
 	}
-	return newest, true
+	return parseClawbenchTime(raw.String), true
 }
 
 // RefreshLastActive 遍历所有没被删除的租户，更新最近活跃时间。单个租户读失败

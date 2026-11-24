@@ -297,6 +297,9 @@ func validateRetentionSettings(s domain.Settings) error {
 	if s.BackupHour < 0 || s.BackupHour > 23 {
 		return errors.New("备份时间必须是 0-23 点")
 	}
+	if s.NpmAutoHour < 0 || s.NpmAutoHour > 23 {
+		return errors.New("自动检查新版本的时间必须是 0-23 点")
+	}
 	if s.BackupRetention < 1 {
 		return errors.New("备份保留天数必须大于 0")
 	}

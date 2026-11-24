@@ -20,6 +20,7 @@ import { api, downloadFile, errorMessage } from '../api'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import CopyField from '../components/CopyField.vue'
 import EmptyState from '../components/EmptyState.vue'
+import LoadingState from '../components/LoadingState.vue'
 import Modal from '../components/Modal.vue'
 import LineChart from '../components/LineChart.vue'
 import StatusBadge from '../components/StatusBadge.vue'
@@ -62,6 +63,7 @@ const quota = ref({ cpu_quota: '', memory_max: '', tasks_max: 0, disk_quota_gb: 
 const usageWindow = ref<'24h' | '7d'>('24h')
 const usage = ref<MetricSample[]>([])
 const usageLoading = ref(false)
+const auditLoading = ref(false)
 const usageError = ref('')
 
 const cpuSeries = computed<Series[]>(() => [
@@ -351,6 +353,7 @@ async function loadLogs() {
 
 async function loadAudit() {
   if (!tenant.value) return
+  auditLoading.value = true
   try {
     const res = await api.get<{ items: AuditEntry[] }>(
       `/audit?tenant=${encodeURIComponent(tenant.value.username)}&page_size=30`,
@@ -358,6 +361,8 @@ async function loadAudit() {
     audit.value = res.items
   } catch (e) {
     toast(errorMessage(e, '读取操作记录失败'), 'error')
+  } finally {
+    auditLoading.value = false
   }
 }
 
@@ -463,7 +468,37 @@ function download(backup: Backup) {
     <div class="row"><AlertTriangle :size="18" color="var(--red)" /> {{ error }}</div>
   </div>
 
-  <div v-else-if="loading && !tenant" class="muted">加载中…</div>
+  <div v-else-if="loading && !tenant">
+    <LoadingState text="正在读取这个实例的信息…" />
+
+    <div class="card" style="margin-top: 14px">
+      <div class="row-between" style="flex-wrap: wrap; gap: 14px">
+        <div style="min-width: 240px">
+          <div class="skeleton" style="width: 180px; height: 26px" />
+          <div class="skeleton" style="width: 140px; height: 13px; margin-top: 10px" />
+        </div>
+        <div class="row" style="gap: 8px; flex-wrap: wrap">
+          <div v-for="n in 4" :key="n" class="skeleton" style="width: 78px; height: 32px" />
+        </div>
+      </div>
+      <div class="skeleton" style="width: 100%; max-width: 520px; height: 38px; margin-top: 18px" />
+    </div>
+
+    <div class="grid grid-2" style="margin-top: 14px">
+      <div v-for="n in 2" :key="n" class="card">
+        <div class="skeleton" style="width: 110px; height: 16px" />
+        <div class="skeleton" style="width: 100%; height: 12px; margin-top: 14px" />
+        <div class="skeleton" style="width: 80%; height: 12px; margin-top: 10px" />
+        <div class="skeleton" style="width: 60%; height: 12px; margin-top: 10px" />
+      </div>
+    </div>
+
+    <div class="card" style="margin-top: 14px">
+      <div class="skeleton" style="width: 90px; height: 16px" />
+      <div class="skeleton" style="width: 100%; height: 12px; margin-top: 14px" />
+      <div class="skeleton" style="width: 70%; height: 12px; margin-top: 10px" />
+    </div>
+  </div>
 
   <div v-else-if="tenant">
     <div class="card">
@@ -721,7 +756,8 @@ function download(backup: Backup) {
           </div>
         </div>
         <div v-if="usageError" class="small" style="color: var(--red); margin-bottom: 10px">{{ usageError }}</div>
-        <div v-if="!usage.length && !usageLoading" class="muted small" style="padding: 20px 0">
+        <LoadingState v-if="usageLoading && !usage.length" text="正在读取用量记录…" />
+        <div v-else-if="!usage.length" class="muted small" style="padding: 20px 0">
           还没有用量记录。实例运行满 5 分钟后就会出现第一个点。
         </div>
         <div v-else class="stack" style="gap: 22px">
@@ -741,7 +777,8 @@ function download(backup: Backup) {
       </div>
 
       <div v-else>
-        <div v-if="audit.length" class="table-wrap">
+        <LoadingState v-if="auditLoading" text="正在读取操作记录…" />
+        <div v-else-if="audit.length" class="table-wrap">
           <table class="table">
             <thead><tr><th>时间</th><th>操作</th><th>操作人</th><th>结果</th><th>IP</th></tr></thead>
             <tbody>

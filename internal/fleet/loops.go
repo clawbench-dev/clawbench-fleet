@@ -331,7 +331,29 @@ func (s *Service) dailyLoop(ctx context.Context) {
 		if s.shouldRun("artifacts", 6) {
 			s.cleanupArtifacts()
 		}
+		if st := s.Settings(); st.NpmAutoEnabled && s.npmAutoDue(st, time.Now()) {
+			go s.runNpmAutoCheck(ctx)
+		}
 	}
+}
+
+// runNpmAutoCheck is the scheduled wrapper around RunNpmAutoCheck. Once it has
+// run today it stays quiet: an unchanged library turns every check into the
+// same "already have it" result, and one audit row a day saying nothing
+// happened is noise. Failures are logged so the operator can tell a typo in the
+// package name from a machine without npm.
+func (s *Service) runNpmAutoCheck(ctx context.Context) {
+	checkCtx, cancel := context.WithTimeout(ctx, npmAutoTimeout)
+	defer cancel()
+	res, err := s.RunNpmAutoCheck(checkCtx, AuditContext{Actor: actorSystem})
+	if err != nil {
+		log.Printf("定时 npm 升级失败：%v", err)
+	}
+	if len(res.Installed) == 0 && err == nil {
+		return
+	}
+	detail := map[string]any{"installed": res.Installed, "latest": res.Current}
+	s.Audit(AuditContext{Actor: actorSystem}, "upgrade.npm_auto", nil, detail, err)
 }
 
 func (s *Service) shouldRun(key string, hour int) bool {

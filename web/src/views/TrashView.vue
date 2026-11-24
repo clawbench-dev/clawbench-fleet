@@ -5,6 +5,7 @@ import { api, errorMessage } from '../api'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import CopyField from '../components/CopyField.vue'
 import EmptyState from '../components/EmptyState.vue'
+import LoadingState from '../components/LoadingState.vue'
 import Modal from '../components/Modal.vue'
 import { toast } from '../stores/toast'
 import type { Tenant, TrashItem } from '../types'
@@ -101,6 +102,9 @@ async function doPurge() {
             </tr>
           </tbody>
         </table>
+      </div>
+      <div v-else-if="loading">
+        <LoadingState />
       </div>
       <EmptyState v-else title="回收站是空的" hint="删除租户后会先放到这里，30 天内都能恢复。" />
     </div>

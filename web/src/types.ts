@@ -169,6 +169,9 @@ export interface Settings {
   backup_enabled: boolean
   backup_hour: number
   backup_retention_days: number
+  npm_auto_enabled: boolean
+  npm_auto_weekly: boolean
+  npm_auto_hour: number
   trash_retention_days: number
   audit_retention_days: number
   allow_port_forward: boolean

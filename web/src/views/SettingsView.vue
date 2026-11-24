@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { KeyRound, Save, Server, ShieldCheck } from 'lucide-vue-next'
+import { AlertTriangle, KeyRound, Save, Server, ShieldCheck } from 'lucide-vue-next'
 import { api, errorMessage } from '../api'
+import EmptyState from '../components/EmptyState.vue'
+import LoadingState from '../components/LoadingState.vue'
 import Modal from '../components/Modal.vue'
 import { auth } from '../stores/auth'
 import { toast } from '../stores/toast'
@@ -10,6 +12,8 @@ import type { CertificateInfo, ConfigEntry, Job, Settings, SSHStatus } from '../
 
 const router = useRouter()
 const settings = ref<Settings | null>(null)
+const loading = ref(true)
+const loadError = ref('')
 const tenantConfig = ref<ConfigEntry[]>([])
 const cert = ref<CertificateInfo | null>(null)
 const certSaving = ref(false)
@@ -22,6 +26,15 @@ const meta = ref<{
   ssh_status: SSHStatus
 } | null>(null)
 const saving = ref(false)
+// npmAutoFrequency is the page's way of expressing the two separate fields: the
+// backend only needs "weekly yes/no" plus an hour, so folding it into one
+// dropdown keeps the UI honest and avoids a second checkbox.
+const npmAutoFrequency = computed({
+  get: () => (settings.value?.npm_auto_weekly ? 'weekly' : 'daily'),
+  set: (v: string) => {
+    if (settings.value) settings.value.npm_auto_weekly = v === 'weekly'
+  },
+})
 const pwd = ref({ current_password: '', new_password: '', confirm: '' })
 const pwdSaving = ref(false)
 
@@ -32,6 +45,7 @@ const sshReady = computed(
 const guestURL = computed(() => window.location.origin + '/guest')
 
 async function load() {
+  loading.value = true
   try {
     const res = await api.get<{
       settings: Settings
@@ -55,8 +69,12 @@ async function load() {
       fleet_version: res.fleet_version,
       ssh_status: res.ssh_status,
     }
+    loadError.value = ''
   } catch (e) {
+    loadError.value = errorMessage(e, '加载失败')
     toast(errorMessage(e, '加载失败'), 'error')
+  } finally {
+    loading.value = false
   }
 }
 
@@ -308,7 +326,18 @@ async function changePassword() {
 </script>
 
 <template>
-  <div v-if="settings" style="max-width: 1040px">
+  <div v-if="loading && !settings">
+    <LoadingState text="正在读取平台设置…" />
+  </div>
+
+  <div v-else-if="!settings" class="card" style="max-width: 1040px; border-color: rgba(255,107,107,.4)">
+    <div class="row-between">
+      <div class="row"><AlertTriangle :size="18" color="var(--red)" /> {{ loadError || '设置没能加载出来' }}</div>
+      <button class="btn btn-sm" type="button" @click="load">重试</button>
+    </div>
+  </div>
+
+  <div v-else style="max-width: 1040px">
     <div class="grid grid-2">
       <div class="card">
         <div class="card-header">
@@ -380,6 +409,37 @@ async function changePassword() {
           <div class="form-grid">
             <div class="field"><label>备份时间（0-23 点）</label><input v-model.number="settings.backup_hour" class="input mono" type="number" min="0" max="23" /></div>
             <div class="field"><label>保留天数</label><input v-model.number="settings.backup_retention_days" class="input mono" type="number" min="1" /></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <div class="card-title">自动拉取新版本</div>
+            <div class="card-sub">只把新版本下载到本机，不会动任何实例</div>
+          </div>
+        </div>
+        <div class="stack">
+          <label class="row small">
+            <input v-model="settings.npm_auto_enabled" class="checkbox" type="checkbox" />
+            定时从 npm 检查并下载新版本
+          </label>
+          <div class="form-grid">
+            <div class="field">
+              <label>检查频率</label>
+              <select v-model="npmAutoFrequency" class="select" :disabled="!settings.npm_auto_enabled">
+                <option value="daily">每天</option>
+                <option value="weekly">每周一次（周日）</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>检查时间（0-23 点）</label>
+              <input v-model.number="settings.npm_auto_hour" class="input mono" type="number" min="0" max="23" :disabled="!settings.npm_auto_enabled" />
+            </div>
+          </div>
+          <div class="small muted-2">
+            下载好的版本会出现在「升级」页，试点和批量升级仍然要你自己点。
           </div>
         </div>
       </div>
@@ -540,10 +600,11 @@ async function changePassword() {
           </tr>
         </tbody>
       </table>
-      <div v-else class="small muted-2">还没有配置项。点「添加一项」，比如 <span class="mono">chat.page_size</span> = <span class="mono">50</span>。</div>
-      <div class="small muted-2" style="margin-top: 10px">
-        端口、监听地址、密码、证书目录由平台自己维护，不能在这里覆盖。保存只存平台这边，点「下发到所有实例」才会写进实例并重启它们。
-      </div>
+      <EmptyState v-else title="还没有配置项" hint="点「添加一项」试试，比如 chat.page_size = 50。">
+        <div class="small muted-2">
+          端口、监听地址、密码、证书目录由平台自己维护，不能在这里覆盖。保存只存平台这边，点「下发到所有实例」才会写进实例并重启它们。
+        </div>
+      </EmptyState>
     </div>
 
     <div class="card" style="margin-top: 16px">

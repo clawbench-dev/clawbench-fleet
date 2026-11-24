@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { AlertTriangle, ChevronLeft, ChevronRight, Megaphone, RefreshCw, Search, Server } from 'lucide-vue-next'
 import { api, errorMessage } from '../api'
+import LoadingState from '../components/LoadingState.vue'
 import Modal from '../components/Modal.vue'
 import TenantTable from '../components/TenantTable.vue'
 import type { Row } from '../components/TenantTable.vue'
@@ -147,7 +148,9 @@ async function submitReport() {
         @report="openReport"
       />
 
-      <div v-else-if="!loading" class="card guest-disabled" style="margin-top: 12px">
+      <LoadingState v-else-if="loading" text="正在读取实例列表…" />
+
+      <div v-else class="card guest-disabled" style="margin-top: 12px">
         <Search :size="20" color="var(--muted-2)" />
         <div>
           <div class="card-title">没找到</div>
@@ -173,7 +176,7 @@ async function submitReport() {
       </div>
     </template>
 
-    <div v-else class="muted" style="padding: 40px; text-align: center">加载中…</div>
+    <LoadingState v-else text="正在读取…" />
 
     <Modal v-if="reportTarget" title="报告问题" @close="reportTarget = null">
       <div class="stack">

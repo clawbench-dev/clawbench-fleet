@@ -3,6 +3,7 @@
 // 组件，只是把操作列关了、接口换成公开的那一个。
 // 加信息时只改这里，两个页面自动同步；加按钮时记得想清楚它是不是只该给管理员。
 import { computed } from 'vue'
+import EmptyState from './EmptyState.vue'
 import StatusBadge from './StatusBadge.vue'
 import { formatAgo, formatBytes, formatPercent, formatTime } from '../utils'
 
@@ -41,7 +42,8 @@ const allChecked = computed(
 </script>
 
 <template>
-  <div class="table-wrap">
+  <EmptyState v-if="!items.length" title="没有找到租户" hint="换个搜索词，或者创建第一个实例。" />
+  <div v-else class="tenant-table">
     <table class="table">
       <thead>
         <tr>

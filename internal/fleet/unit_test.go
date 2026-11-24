@@ -55,6 +55,8 @@ func TestValidateSettingsRejectsEveryField(t *testing.T) {
 		func(s *domain.Settings) { s.DiskWarnGB = -1 },
 		func(s *domain.Settings) { s.BackupHour = -1 },
 		func(s *domain.Settings) { s.BackupHour = 24 },
+		func(s *domain.Settings) { s.NpmAutoHour = -1 },
+		func(s *domain.Settings) { s.NpmAutoHour = 24 },
 		func(s *domain.Settings) { s.BackupRetention = 0 },
 		func(s *domain.Settings) { s.TrashRetention = 0 },
 		func(s *domain.Settings) { s.AuditRetention = 0 },
@@ -165,13 +167,9 @@ func TestLastActiveReadsInstanceDatabase(t *testing.T) {
 	}
 	stmts := []string{
 		`CREATE TABLE chat_history(created_at TEXT)`,
-		`CREATE TABLE chat_tool_calls(created_at TEXT)`,
-		`CREATE TABLE chat_metadata(created_at TEXT)`,
 		`CREATE TABLE chat_sessions(updated_at TEXT, removed INTEGER)`,
 		`INSERT INTO chat_history VALUES('2026-01-01 08:00:00')`,
-		`INSERT INTO chat_tool_calls VALUES('2026-01-03 09:30:00')`,
-		`INSERT INTO chat_metadata VALUES('2026-01-02 10:00:00')`,
-		`INSERT INTO chat_sessions VALUES('2026-01-04 11:00:00', 0)`,
+		`INSERT INTO chat_history VALUES('2026-01-02 10:00:00')`,
 		`INSERT INTO chat_sessions VALUES('2026-01-09 11:00:00', 1)`,
 	}
 	for _, stmt := range stmts {
@@ -185,12 +183,13 @@ func TestLastActiveReadsInstanceDatabase(t *testing.T) {
 	if !hasDB || !found.ok {
 		t.Fatalf("activity not found: %+v %v", found, hasDB)
 	}
-	if got := found.at.Format(time.RFC3339); got != "2026-01-04T11:00:00Z" {
+	// Only the newest chat message counts; the later session row is ignored.
+	if got := found.at.Format(time.RFC3339); got != "2026-01-02T10:00:00Z" {
 		t.Fatalf("newest activity = %s", got)
 	}
 	svc.RefreshLastActive(ctx)
 	fresh, err := svc.GetTenant(tenant.ID)
-	if err != nil || fresh.LastActiveAt != "2026-01-04T11:00:00Z" {
+	if err != nil || fresh.LastActiveAt != "2026-01-02T10:00:00Z" {
 		t.Fatalf("refresh = %+v %v", fresh, err)
 	}
 	// Running it again is a no-op, and the detail page fills in the value.

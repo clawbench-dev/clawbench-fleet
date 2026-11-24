@@ -11,6 +11,8 @@ import {
   Users,
 } from 'lucide-vue-next'
 import { api, errorMessage } from '../api'
+import EmptyState from '../components/EmptyState.vue'
+import LoadingState from '../components/LoadingState.vue'
 import MetricBar from '../components/MetricBar.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import { toast } from '../stores/toast'
@@ -19,6 +21,7 @@ import { actionLabel, formatBytes, formatPercent, formatTime } from '../utils'
 
 const data = ref<Overview | null>(null)
 const error = ref('')
+const loading = ref(true)
 let timer = 0
 
 async function load() {
@@ -27,6 +30,8 @@ async function load() {
     error.value = ''
   } catch (e) {
     error.value = errorMessage(e, '加载失败')
+  } finally {
+    loading.value = false
   }
 }
 
@@ -69,6 +74,11 @@ const diskPercent = computed(() => {
       <div class="row"><AlertTriangle :size="18" color="var(--red)" /> {{ error }}</div>
     </div>
 
+    <div v-if="loading" class="card">
+      <LoadingState text="正在读取机器和实例状态…" />
+    </div>
+
+    <template v-else-if="data">
     <div class="grid grid-4">
       <div class="stat">
         <div class="stat-label"><Users :size="14" /> 租户总数</div>
@@ -260,19 +270,18 @@ const diskPercent = computed(() => {
     </div>
 
     <div v-if="data && data.total === 0" class="card" style="margin-top: 16px">
-      <div class="empty">
-        <div style="font-weight: 600; color: var(--muted)">还没有租户</div>
-        <div class="small" style="margin-top: 4px">先上传一个 Clawbench 版本，然后创建第一个实例。</div>
-        <div class="btn-row" style="justify-content: center; margin-top: 14px">
+      <EmptyState title="还没有租户" hint="先上传一个 Clawbench 版本，然后创建第一个实例。">
+        <div class="btn-row" style="justify-content: center">
           <router-link class="btn" to="/upgrades">去上传版本</router-link>
           <router-link class="btn btn-primary" to="/tenants/new">新建租户</router-link>
         </div>
-      </div>
+      </EmptyState>
     </div>
 
     <div class="small muted-2" style="margin-top: 18px; display: flex; gap: 16px; flex-wrap: wrap">
       <span><Clock :size="13" style="vertical-align: -2px" /> 每 5 秒自动刷新</span>
       <span v-if="data?.mode === 'dev'" style="color: var(--amber)">开发模式：使用模拟的 systemd 和实例，不会真的建 Linux 用户</span>
     </div>
+    </template>
   </div>
 </template>

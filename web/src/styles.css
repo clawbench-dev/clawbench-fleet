@@ -745,6 +745,42 @@ p {
   opacity: 0.6;
 }
 
+.loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 34px 20px;
+  color: var(--muted-2);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  background: rgba(13, 21, 38, 0.35);
+}
+
+.loading svg {
+  width: 18px;
+  height: 18px;
+  opacity: 0.7;
+}
+
+/* 详情页加载时的骨架：先按真实布局占好位，数据回来直接换掉，
+   避免页面从「一行加载中」突然跳成一大片内容。 */
+.skeleton {
+  border-radius: 6px;
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.09), rgba(255, 255, 255, 0.04));
+  background-size: 200% 100%;
+  animation: skeleton-sweep 1.4s ease-in-out infinite;
+}
+
+@keyframes skeleton-sweep {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+
 .pre {
   margin: 0;
   padding: 14px;

@@ -84,7 +84,7 @@ func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSelfInfo(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.svc.SelfUpgradeInfo())
+	writeJSON(w, http.StatusOK, s.svc.SelfUpgradeInfo(r.Context()))
 }
 
 // handleSelfAdopt writes the platform's own systemd unit, enables it and

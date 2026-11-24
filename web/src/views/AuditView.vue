@@ -3,6 +3,7 @@ import { onMounted, ref } from 'vue'
 import { ChevronLeft, ChevronRight, RefreshCw, Search } from 'lucide-vue-next'
 import { api, errorMessage } from '../api'
 import EmptyState from '../components/EmptyState.vue'
+import LoadingState from '../components/LoadingState.vue'
 import { toast } from '../stores/toast'
 import type { AuditEntry, Page } from '../types'
 import { actionLabel, formatTime } from '../utils'
@@ -124,7 +125,11 @@ function go(delta: number) {
       </table>
     </div>
 
-    <div v-else-if="!loading" style="margin-top: 12px">
+    <div v-else-if="loading" style="margin-top: 12px">
+      <LoadingState />
+    </div>
+
+    <div v-else style="margin-top: 12px">
       <EmptyState title="没有匹配的记录" hint="换个筛选条件试试。" />
     </div>
 

@@ -3,6 +3,8 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { AlertTriangle, ArrowUpCircle, Download, Play, RotateCcw, UploadCloud } from 'lucide-vue-next'
 import { api, errorMessage } from '../api'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
+import EmptyState from '../components/EmptyState.vue'
+import LoadingState from '../components/LoadingState.vue'
 import { toast } from '../stores/toast'
 import type { Job, NpmVersion, Tenant, Version } from '../types'
 import { formatBytes, formatTime, shortSha } from '../utils'
@@ -26,7 +28,13 @@ const npmWarning = ref('')
 const npmChoice = ref('')
 const npmLoading = ref(false)
 const installing = ref(false)
-const selfInfo = ref<{ version: string; binary: string; supported: boolean; mode: string } | null>(null)
+const selfInfo = ref<{
+  version: string
+  binary: string
+  supported: boolean
+  mode: string
+  adopted: boolean
+} | null>(null)
 const selfFile = ref<File | null>(null)
 const selfUploading = ref(false)
 const selfWaiting = ref(false)
@@ -62,7 +70,13 @@ async function load() {
 
 async function loadSelf() {
   try {
-    selfInfo.value = await api.get<{ version: string; binary: string; supported: boolean; mode: string }>('/upgrades/self')
+    selfInfo.value = await api.get<{
+      version: string
+      binary: string
+      supported: boolean
+      mode: string
+      adopted: boolean
+    }>('/upgrades/self')
   } catch (e) {
     selfWarning.value = errorMessage(e, '读取平台版本失败')
   }
@@ -322,6 +336,7 @@ function statusText(v: Version): string {
           </div>
           <div class="small mono muted-2" style="margin-top: 2px">SHA-256 {{ shortSha(current.sha256) }}</div>
         </div>
+        <div v-else-if="loading" class="empty" style="padding: 18px">正在读取版本信息…</div>
         <div v-else class="empty" style="padding: 18px">还没有当前版本，先从 npm 安装或上传一个 Clawbench 二进制。</div>
         <div class="form-actions" style="justify-content: flex-start">
           <button class="btn" type="button" :disabled="!current" @click="confirmRollback = true">
@@ -358,7 +373,8 @@ function statusText(v: Version): string {
             </option>
           </select>
         </div>
-        <div v-else-if="!npmLoading && !npmWarning" class="empty" style="padding: 14px">npm 上没有查到可用版本。</div>
+        <div v-else-if="npmLoading" class="empty" style="padding: 14px">正在查询 npm 上的版本…</div>
+        <div v-else-if="!npmWarning" class="empty" style="padding: 14px">npm 上没有查到可用版本。</div>
         <div class="form-actions" style="justify-content: flex-start">
           <button
             class="btn btn-primary"
@@ -415,7 +431,10 @@ function statusText(v: Version): string {
           </tbody>
         </table>
       </div>
-      <div v-else class="empty" style="padding: 22px">还没有上传任何版本。</div>
+      <div v-else-if="loading">
+        <LoadingState text="正在读取已安装版本…" />
+      </div>
+      <EmptyState v-else title="还没有上传任何版本" hint="从上面「从 npm 安装」或下面的「离线安装」来装第一个版本。" />
     </div>
 
     <div class="card" style="margin-top: 16px">
@@ -453,6 +472,10 @@ function statusText(v: Version): string {
         当前平台版本 <span class="mono">{{ selfInfo?.version || '—' }}</span>
         <span v-if="selfInfo?.binary" class="mono" style="word-break: break-all"> · {{ selfInfo.binary }}</span>
       </div>
+      <div v-if="selfInfo && selfInfo.supported && !selfInfo.adopted" class="row small" style="color: var(--amber); align-items: flex-start; margin-bottom: 10px">
+        <AlertTriangle :size="15" style="flex: 0 0 auto; margin-top: 1px" />
+        <span>平台还没交给系统托管，现在升级会在替换程序后无法重新启动。请先点下面的「交给系统托管并重启」，成功之后再回来升级。</span>
+      </div>
       <div v-if="selfInfo && !selfInfo.supported" class="row small" style="color: var(--amber); align-items: flex-start; margin-bottom: 10px">
         <AlertTriangle :size="15" style="flex: 0 0 auto; margin-top: 1px" />
         <span>当前是开发模式，不提供平台自升级。请在正式部署（systemd）的服务器上使用。</span>
@@ -466,7 +489,7 @@ function statusText(v: Version): string {
       </div>
       <template v-else>
         <label class="upload-box">
-          <input type="file" style="display: none" :disabled="!selfInfo?.supported" @change="chooseSelfFile" />
+          <input type="file" style="display: none" :disabled="!selfInfo?.supported || !selfInfo?.adopted" @change="chooseSelfFile" />
           <UploadCloud :size="22" />
           <div class="small" style="margin-top: 6px">{{ selfFile ? selfFile.name : '选择 clawbench-fleet 二进制文件' }}</div>
           <div class="small muted-2">{{ selfFile ? formatBytes(selfFile.size) : '最大 600 MB' }}</div>
@@ -475,7 +498,7 @@ function statusText(v: Version): string {
           <button
             class="btn"
             type="button"
-            :disabled="!selfFile || selfUploading || !selfInfo?.supported"
+            :disabled="!selfFile || selfUploading || !selfInfo?.supported || !selfInfo?.adopted"
             @click="confirmSelf = true"
           >
             {{ selfUploading ? '上传并校验中…' : '上传并重启平台' }}
@@ -488,7 +511,14 @@ function statusText(v: Version): string {
           </span>
         </div>
         <div class="form-actions" style="justify-content: flex-start; margin-top: 8px">
+          <span v-if="selfInfo?.adopted" class="badge badge-ok" style="align-self: center">
+            已由系统托管
+          </span>
+          <span v-if="selfInfo?.adopted" class="small muted-2" style="align-self: center">
+            服务 clawbench-fleet.service 由 systemd 管理，开机会自动启动，不需要再点这里。
+          </span>
           <button
+            v-else
             class="btn"
             type="button"
             :disabled="adopting || !selfInfo?.supported"
@@ -527,6 +557,7 @@ function statusText(v: Version): string {
           </tbody>
         </table>
       </div>
+      <div v-else class="small muted-2">正在准备这个任务，稍等一下…</div>
     </div>
 
     <div class="card" style="margin-top: 16px; border-color: rgba(245,185,76,.3)">
