@@ -45,7 +45,7 @@ func (s *Service) SelfBinary() string {
 const selfModeDev = "dev"
 
 // SelfUpgradeInfo describes the platform itself for the upgrade page.
-func (s *Service) SelfUpgradeInfo() map[string]any {
+func (s *Service) SelfUpgradeInfo(ctx context.Context) map[string]any {
 	exe := s.SelfBinary()
 	return map[string]any{
 		fieldVersion: version.Version,
@@ -55,7 +55,22 @@ func (s *Service) SelfUpgradeInfo() map[string]any {
 		// restarting it. The page uses this to explain why it is disabled.
 		"supported": s.Sys.Mode() != selfModeDev,
 		"mode":      s.Sys.Mode(),
+		// The unit file is what adoption leaves behind, so its presence is the
+		// only lasting sign that the platform is managed by systemd. The page
+		// shows a status line instead of the adopt button when it is there.
+		"adopted": s.selfUnitExists(ctx),
 	}
+}
+
+// selfUnitExists reports whether this platform's own systemd unit is on disk.
+// An unreadable unit counts as absent: the page then keeps offering the button,
+// and pressing it only rewrites the same file.
+func (s *Service) selfUnitExists(ctx context.Context) bool {
+	if s.Sys.Mode() == selfModeDev {
+		return false
+	}
+	unit, err := s.Sys.ReadUnit(ctx, sysops.SelfUnit)
+	return err == nil && strings.TrimSpace(unit) != ""
 }
 
 // UploadSelf replaces the platform binary with the uploaded file, keeps a
@@ -73,6 +88,15 @@ func (s *Service) UploadSelf(ctx context.Context, r io.Reader, maxBytes int64, a
 	exe := s.SelfBinary()
 	if exe == "" {
 		return nil, errors.New("找不到当前平台程序的路径，无法升级")
+	}
+	// The swap below happens before the restart is requested, so on a
+	// hand-started process the binary would be replaced and then
+	// `systemctl restart` would find no unit to start: the old process keeps
+	// running the old image until it exits, and nothing brings the platform
+	// back. Adoption has to come first.
+	if !s.selfUnitExists(ctx) {
+		return nil, errors.New("平台还没交给系统托管，现在升级会在替换程序后无法重新启动。" +
+			"请先点「交给系统托管并重启」，之后再升级")
 	}
 	dir := filepath.Dir(exe)
 	// Failing here is a permission problem the operator can fix (the service
@@ -188,13 +212,14 @@ func (s *Service) AdoptSelf(ctx context.Context, ac AuditContext) (*AdoptSelfRes
 	if exe == "" {
 		return nil, errors.New("找不到当前平台程序的路径，无法托管")
 	}
-	// The unit starts the platform with this file. Handing the service to
-	// systemd when the file is not there would stop the only running copy and
-	// leave nothing to start: the page would simply stop answering.
+	// A missing config file is fine: config.Load treats it as "use the built-in
+	// defaults", so a unit naming it still starts. Any other stat error means we
+	// cannot tell, and stopping the only running copy on a guess would leave the
+	// page not answering.
 	cfgPath := s.configFilePath()
-	if _, statErr := os.Stat(cfgPath); statErr != nil {
-		return nil, fmt.Errorf("找不到配置文件 %s，托管后平台会起不来。"+
-			"请确认启动时的 --config 指向一个存在的文件再操作：%w", cfgPath, statErr)
+	if _, statErr := os.Stat(cfgPath); statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+		return nil, fmt.Errorf("读不到配置文件 %s 的状态，无法确认托管后能否启动："+
+			"请检查该文件或启动时的 --config：%w", cfgPath, statErr)
 	}
 	// Nothing below may leave the platform down: the unit is written and enabled
 	// first, so ending this process is always followed by systemd starting the

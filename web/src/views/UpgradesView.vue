@@ -26,7 +26,13 @@ const npmWarning = ref('')
 const npmChoice = ref('')
 const npmLoading = ref(false)
 const installing = ref(false)
-const selfInfo = ref<{ version: string; binary: string; supported: boolean; mode: string } | null>(null)
+const selfInfo = ref<{
+  version: string
+  binary: string
+  supported: boolean
+  mode: string
+  adopted: boolean
+} | null>(null)
 const selfFile = ref<File | null>(null)
 const selfUploading = ref(false)
 const selfWaiting = ref(false)
@@ -62,7 +68,13 @@ async function load() {
 
 async function loadSelf() {
   try {
-    selfInfo.value = await api.get<{ version: string; binary: string; supported: boolean; mode: string }>('/upgrades/self')
+    selfInfo.value = await api.get<{
+      version: string
+      binary: string
+      supported: boolean
+      mode: string
+      adopted: boolean
+    }>('/upgrades/self')
   } catch (e) {
     selfWarning.value = errorMessage(e, '读取平台版本失败')
   }
@@ -453,6 +465,10 @@ function statusText(v: Version): string {
         当前平台版本 <span class="mono">{{ selfInfo?.version || '—' }}</span>
         <span v-if="selfInfo?.binary" class="mono" style="word-break: break-all"> · {{ selfInfo.binary }}</span>
       </div>
+      <div v-if="selfInfo && selfInfo.supported && !selfInfo.adopted" class="row small" style="color: var(--amber); align-items: flex-start; margin-bottom: 10px">
+        <AlertTriangle :size="15" style="flex: 0 0 auto; margin-top: 1px" />
+        <span>平台还没交给系统托管，现在升级会在替换程序后无法重新启动。请先点下面的「交给系统托管并重启」，成功之后再回来升级。</span>
+      </div>
       <div v-if="selfInfo && !selfInfo.supported" class="row small" style="color: var(--amber); align-items: flex-start; margin-bottom: 10px">
         <AlertTriangle :size="15" style="flex: 0 0 auto; margin-top: 1px" />
         <span>当前是开发模式，不提供平台自升级。请在正式部署（systemd）的服务器上使用。</span>
@@ -466,7 +482,7 @@ function statusText(v: Version): string {
       </div>
       <template v-else>
         <label class="upload-box">
-          <input type="file" style="display: none" :disabled="!selfInfo?.supported" @change="chooseSelfFile" />
+          <input type="file" style="display: none" :disabled="!selfInfo?.supported || !selfInfo?.adopted" @change="chooseSelfFile" />
           <UploadCloud :size="22" />
           <div class="small" style="margin-top: 6px">{{ selfFile ? selfFile.name : '选择 clawbench-fleet 二进制文件' }}</div>
           <div class="small muted-2">{{ selfFile ? formatBytes(selfFile.size) : '最大 600 MB' }}</div>
@@ -475,7 +491,7 @@ function statusText(v: Version): string {
           <button
             class="btn"
             type="button"
-            :disabled="!selfFile || selfUploading || !selfInfo?.supported"
+            :disabled="!selfFile || selfUploading || !selfInfo?.supported || !selfInfo?.adopted"
             @click="confirmSelf = true"
           >
             {{ selfUploading ? '上传并校验中…' : '上传并重启平台' }}
@@ -488,7 +504,14 @@ function statusText(v: Version): string {
           </span>
         </div>
         <div class="form-actions" style="justify-content: flex-start; margin-top: 8px">
+          <span v-if="selfInfo?.adopted" class="badge badge-ok" style="align-self: center">
+            已由系统托管
+          </span>
+          <span v-if="selfInfo?.adopted" class="small muted-2" style="align-self: center">
+            服务 clawbench-fleet.service 由 systemd 管理，开机会自动启动，不需要再点这里。
+          </span>
           <button
+            v-else
             class="btn"
             type="button"
             :disabled="adopting || !selfInfo?.supported"

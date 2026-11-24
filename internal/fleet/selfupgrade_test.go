@@ -131,7 +131,7 @@ func TestUploadSelfIsRefusedInDev(t *testing.T) {
 	if !strings.Contains(err.Error(), "开发模式") {
 		t.Fatalf("err = %v", err)
 	}
-	if info := svc.SelfUpgradeInfo(); info["supported"] != false {
+	if info := svc.SelfUpgradeInfo(context.Background()); info["supported"] != false {
 		t.Fatalf("info = %+v", info)
 	}
 }
@@ -141,6 +141,9 @@ func TestUploadSelfIsRefusedInDev(t *testing.T) {
 // service is restarted exactly once.
 func TestUploadSelfReplacesAndRestarts(t *testing.T) {
 	svc, sys := withSelfSys(t)
+	if err := svc.Sys.WriteUnit(context.Background(), sysops.SelfUnit, "[Service]\n"); err != nil {
+		t.Fatal(err)
+	}
 	res, err := svc.UploadSelf(context.Background(), strings.NewReader("new build"), 1<<20, AuditContext{Actor: "tester"})
 	if err != nil {
 		t.Fatalf("upload: %v", err)
@@ -183,6 +186,9 @@ func TestUploadSelfLeavesBinaryUntouchedOnValidationFailure(t *testing.T) {
 			if tc.prep != nil {
 				tc.prep(sys)
 			}
+			if err := svc.Sys.WriteUnit(context.Background(), sysops.SelfUnit, "[Service]\n"); err != nil {
+				t.Fatal(err)
+			}
 			res, err := svc.UploadSelf(context.Background(), strings.NewReader(tc.body), 1024, AuditContext{Actor: "tester"})
 			if err == nil {
 				t.Fatalf("expected a failure, got %+v", res)
@@ -201,6 +207,9 @@ func TestUploadSelfLeavesBinaryUntouchedOnValidationFailure(t *testing.T) {
 // failed swap must be a plain error, nothing restarted.
 func TestUploadSelfReportsSwapFailure(t *testing.T) {
 	svc, sys := withSelfSys(t)
+	if err := svc.Sys.WriteUnit(context.Background(), sysops.SelfUnit, "[Service]\n"); err != nil {
+		t.Fatal(err)
+	}
 	sys.replaceErr = errors.New("permission denied")
 	_, err := svc.UploadSelf(context.Background(), strings.NewReader("build"), 1<<20, AuditContext{Actor: "tester"})
 	if err == nil || !strings.Contains(err.Error(), "仍然运行旧版本") {
@@ -216,6 +225,9 @@ func TestUploadSelfReportsSwapFailure(t *testing.T) {
 // gets the paths, plus a warning naming the manual command.
 func TestUploadSelfKeepsReplyingWhenRestartFails(t *testing.T) {
 	svc, sys := withSelfSys(t)
+	if err := svc.Sys.WriteUnit(context.Background(), sysops.SelfUnit, "[Service]\n"); err != nil {
+		t.Fatal(err)
+	}
 	sys.restartErr = errors.New("systemd not running")
 	res, err := svc.UploadSelf(context.Background(), strings.NewReader("build"), 1<<20, AuditContext{Actor: "tester"})
 	if err == nil || !strings.Contains(err.Error(), "systemctl restart") {
@@ -296,18 +308,105 @@ func TestAdoptSelfChangesNothingWhenTheUnitCannotBeWritten(t *testing.T) {
 	}
 }
 
-// TestAdoptSelfRefusesWhenTheConfigFileIsMissing protects a custom --config
-// deployment: handing it to a unit that names a missing file would stop the
-// only running copy and start nothing.
-func TestAdoptSelfRefusesWhenTheConfigFileIsMissing(t *testing.T) {
+// TestAdoptSelfAllowsAMissingConfigFile: config.Load falls back to the built-in
+// defaults when the file is absent, so the unit still starts and adoption is
+// safe. Refusing here would block the common by-hand deployment that never
+// created /etc/clawbench-fleet/config.yaml.
+func TestAdoptSelfAllowsAMissingConfigFile(t *testing.T) {
 	svc, sys := withSelfSys(t)
 	svc.ConfigPath = filepath.Join(t.TempDir(), "nope.yaml")
 	sys.holders = []sysops.PortHolder{{PID: 1}}
+	res, err := svc.AdoptSelf(context.Background(), AuditContext{Actor: "tester"})
+	if err != nil {
+		t.Fatalf("a missing config file must not block adoption: %v", err)
+	}
+	if res.ConfigPath != svc.ConfigPath {
+		t.Fatalf("config path = %q, want %q", res.ConfigPath, svc.ConfigPath)
+	}
+	if sys.restarted != 1 {
+		t.Fatalf("adoption must finish: order=%v restarted=%d", sys.order, sys.restarted)
+	}
+}
+
+// TestAdoptSelfRefusesWhenTheConfigFileIsUnreadable: only "not there" is known
+// to be harmless. Any other stat failure leaves us unable to tell, and stopping
+// the only running copy on a guess would take the page down.
+func TestAdoptSelfRefusesWhenTheConfigFileIsUnreadable(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can stat through a chmod 000 directory")
+	}
+	svc, sys := withSelfSys(t)
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	svc.ConfigPath = filepath.Join(dir, "config.yaml")
+	sys.holders = []sysops.PortHolder{{PID: 1}}
 	if _, err := svc.AdoptSelf(context.Background(), AuditContext{Actor: "tester"}); err == nil {
-		t.Fatal("a missing config file must be reported")
+		t.Fatal("an unreadable config path must be reported")
 	}
 	if len(sys.order) != 0 || len(sys.killedPID) != 0 || sys.restarted != 0 {
 		t.Fatalf("nothing may be touched: %v %v %d", sys.order, sys.killedPID, sys.restarted)
+	}
+}
+
+// TestUploadSelfRefusesBeforeAdoption protects the deployment started by hand:
+// the swap happens before the restart is requested, so upgrading first would
+// leave the new binary on disk with no unit to start it and nothing that brings
+// the platform back once the hand-started process exits.
+func TestUploadSelfRefusesBeforeAdoption(t *testing.T) {
+	svc, sys := withSelfSys(t)
+	_, err := svc.UploadSelf(context.Background(), strings.NewReader("new build"), 1<<20, AuditContext{Actor: "tester"})
+	if err == nil {
+		t.Fatal("an un-adopted platform must refuse the self upgrade")
+	}
+	if !strings.Contains(err.Error(), "托管") {
+		t.Fatalf("err = %v", err)
+	}
+	if len(sys.replaced) != 0 || sys.restarted != 0 {
+		t.Fatalf("nothing may be touched: replaced=%v restarted=%d", sys.replaced, sys.restarted)
+	}
+}
+
+// TestUploadSelfIsAllowedAfterAdoption: once the unit is on disk, the restart
+// has a target and the upgrade is safe.
+func TestUploadSelfIsAllowedAfterAdoption(t *testing.T) {
+	svc, sys := withSelfSys(t)
+	if err := svc.Sys.WriteUnit(context.Background(), sysops.SelfUnit, "[Service]\n"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.UploadSelf(context.Background(), strings.NewReader("new build"), 1<<20, AuditContext{Actor: "tester"}); err != nil {
+		t.Fatalf("upload after adoption: %v", err)
+	}
+	if len(sys.replaced) != 1 || sys.restarted != 1 {
+		t.Fatalf("replaced=%v restarted=%d", sys.replaced, sys.restarted)
+	}
+}
+
+// TestSelfUpgradeInfoReportsAdoption: the adopt button hides once the unit
+// exists, and it is the unit file — not anything the process remembers — that
+// says so, because a restart wipes everything the process kept in memory.
+func TestSelfUpgradeInfoReportsAdoption(t *testing.T) {
+	svc, _ := withSelfSys(t)
+	if info := svc.SelfUpgradeInfo(context.Background()); info["adopted"] != false {
+		t.Fatalf("before adoption: %+v", info)
+	}
+	svc.ConfigPath = filepath.Join(t.TempDir(), "config.yaml")
+	if err := svc.Sys.WriteUnit(context.Background(), sysops.SelfUnit, "[Service]\n"); err != nil {
+		t.Fatal(err)
+	}
+	if info := svc.SelfUpgradeInfo(context.Background()); info["adopted"] != true {
+		t.Fatalf("after adoption: %+v", info)
+	}
+}
+
+// TestSelfUpgradeInfoNeverClaimsAdoptionInDev keeps the status line out of the
+// dev server, which has no unit to point at.
+func TestSelfUpgradeInfoNeverClaimsAdoptionInDev(t *testing.T) {
+	svc := newService(t)
+	if info := svc.SelfUpgradeInfo(context.Background()); info["adopted"] != false {
+		t.Fatalf("dev: %+v", info)
 	}
 }
 
