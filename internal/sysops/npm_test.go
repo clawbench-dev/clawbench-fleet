@@ -57,3 +57,14 @@ func TestNpmPlatformPackage(t *testing.T) {
 		t.Fatal("unscoped package should be rejected")
 	}
 }
+
+// TestNpmPlatformPackageRejectsEmptyName covers the "@scope/" form, which is a
+// typo an operator can easily make in config.yaml. It has to be reported
+// instead of producing a package like "@scope/-linux-x64".
+func TestNpmPlatformPackageRejectsEmptyName(t *testing.T) {
+	for _, pkg := range []string{"@scope/", "@scope/ ", "  "} {
+		if _, err := NpmPlatformPackage(pkg); err == nil {
+			t.Fatalf("%q should be rejected", pkg)
+		}
+	}
+}

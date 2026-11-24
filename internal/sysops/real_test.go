@@ -149,6 +149,17 @@ func TestPortHelpers(t *testing.T) {
 	}
 }
 
+func TestPortHoldersRejectsInvalidPort(t *testing.T) {
+	r := NewReal(t.TempDir(), "/usr/sbin/nologin", "/home")
+	// Port 0 would turn the ss filter into "every listening socket" and the
+	// caller would then stop every server on the machine.
+	for _, port := range []int{0, -1, 65536} {
+		if _, err := r.PortHolders(context.Background(), port, "root"); err == nil {
+			t.Fatalf("port %d must be rejected", port)
+		}
+	}
+}
+
 func TestWaitPortClosed(t *testing.T) {
 	// Port 1 is closed, so the wait returns on the first probe.
 	if err := waitPortClosed(context.Background(), 1, 1); err != nil {
@@ -175,6 +186,30 @@ func TestCommandError(t *testing.T) {
 	}
 	if !errors.Is(bare, bare.Err) {
 		t.Fatal("CommandError should unwrap its cause")
+	}
+}
+
+func TestIgnoreMissingUnit(t *testing.T) {
+	missing := &CommandError{
+		Name:   "systemctl",
+		Args:   []string{"stop", "clawbench-alice.service"},
+		Stderr: "Failed to stop clawbench-alice.service: Unit clawbench-alice.service not loaded.\n",
+		Err:    errors.New("exit status 5"),
+	}
+	if err := ignoreMissingUnit(missing); err != nil {
+		t.Fatalf("missing unit should be ignored, got %v", err)
+	}
+	denied := &CommandError{
+		Name:   "systemctl",
+		Args:   []string{"stop", "clawbench-alice.service"},
+		Stderr: "Failed to stop clawbench-alice.service: Access denied\n",
+		Err:    errors.New("exit status 1"),
+	}
+	if err := ignoreMissingUnit(denied); err == nil {
+		t.Fatal("a real failure must still surface")
+	}
+	if err := ignoreMissingUnit(nil); err != nil {
+		t.Fatalf("nil = %v", err)
 	}
 }
 

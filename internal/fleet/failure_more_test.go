@@ -42,7 +42,7 @@ func TestCandidateBlockedReason(t *testing.T) {
 		{"no port", AdoptCandidate{DataDir: t.TempDir()}, "找不到端口"},
 		{"no config", AdoptCandidate{Port: port, DataDir: t.TempDir()}, "没有 config.yaml"},
 		{"port taken", adoptableCandidate(t, svc, port), "已经被其他租户占用"},
-		{"unhealthy", adoptableCandidate(t, svc, freePort(t)), "没响应 HTTP 健康检查"},
+		{"unhealthy", adoptableCandidate(t, svc, freePort(t)), "没响应 Clawbench 健康检查"},
 	}
 	// Claim the port used by the "port taken" case.
 	if err := svc.Store.ClaimPort(port, 99); err != nil {
@@ -151,15 +151,18 @@ func TestAdoptOneFailures(t *testing.T) {
 	t.Run("list users", func(t *testing.T) {
 		svc := newService(t)
 		svc.Sys = hookSystem{listUsersErr: errSimulated}.with(svc.Sys)
-		res := svc.adoptOne(context.Background(), "alice", AuditContext{})
-		if res.Error == "" {
+		if _, err := svc.AdoptTenants(context.Background(), []string{"alice"}, AuditContext{}); err == nil {
 			t.Fatal("list failure should be reported")
 		}
 	})
 	t.Run("already managed", func(t *testing.T) {
 		svc := newService(t)
 		tenant := createRunning(t, svc, "alice")
-		res := svc.adoptOne(context.Background(), tenant.Username, AuditContext{})
+		env, err := svc.loadScanEnv(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		res := svc.adoptOne(context.Background(), env, tenant.Username, AuditContext{})
 		if !strings.Contains(res.Error, "已经在管理列表里") {
 			t.Fatalf("res = %+v", res)
 		}
@@ -167,12 +170,16 @@ func TestAdoptOneFailures(t *testing.T) {
 	t.Run("acquire timeout", func(t *testing.T) {
 		svc, cfg := newTestService(t)
 		seedExistingInstance(t, svc, cfg, "alice", 5001, freePort(t))
+		env, err := svc.loadScanEnv(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
 		for range 4 {
 			svc.sem <- struct{}{}
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 		defer cancel()
-		res := svc.adoptOne(ctx, "alice", AuditContext{})
+		res := svc.adoptOne(ctx, env, "alice", AuditContext{})
 		if res.Error == "" {
 			t.Fatalf("res = %+v", res)
 		}

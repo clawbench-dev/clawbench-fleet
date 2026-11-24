@@ -185,6 +185,46 @@ func (s *Store) ClaimPort(port int, tenantID int64) error {
 	return tx.Commit()
 }
 
+// ChangePort moves a tenant's main port from oldPort to newPort in one
+// transaction. The new port must be free or already belong to the tenant; a
+// port owned by another tenant is never stolen.
+func (s *Store) ChangePort(tenantID int64, oldPort, newPort int) error {
+	if newPort < 1 || newPort > 65535 {
+		return fmt.Errorf("invalid port %d", newPort)
+	}
+	if oldPort == newPort {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var owner int64
+	err = tx.QueryRow(`SELECT COALESCE(tenant_id, 0) FROM ports WHERE port=?`, newPort).Scan(&owner)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		// Port outside the configured range; record it on demand, the same
+		// way adoption claims such a port.
+	case err != nil:
+		return err
+	case owner != 0 && owner != tenantID:
+		return fmt.Errorf("端口 %d 已经被其他租户占用", newPort)
+	}
+	ts := now()
+	if _, err := tx.Exec(`INSERT INTO ports(port, tenant_id, state, updated_at) VALUES(?,?,'allocated',?)
+		ON CONFLICT(port) DO UPDATE SET tenant_id=excluded.tenant_id, state='allocated', updated_at=excluded.updated_at`,
+		newPort, tenantID, ts); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE ports SET state='free', tenant_id=NULL, updated_at=? WHERE port=? AND tenant_id=?`,
+		ts, oldPort, tenantID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *Store) PortState(port int) (string, error) {
 	var state string
 	err := s.db.QueryRow(`SELECT state FROM ports WHERE port=?`, port).Scan(&state)

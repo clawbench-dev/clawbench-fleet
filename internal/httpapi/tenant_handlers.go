@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"time"
 
 	"clawbench-fleet/internal/domain"
 	"clawbench-fleet/internal/fleet"
@@ -18,7 +19,7 @@ func (s *Server) handleListTenants(w http.ResponseWriter, r *http.Request) {
 		Status: r.URL.Query().Get("status"),
 		Page:   page, PageSize: size,
 	}
-	items, total, err := s.svc.ListTenants(f)
+	items, total, err := s.svc.ListTenantsFor(f, r.Host)
 	if err != nil {
 		writeServiceErr(w, err)
 		return
@@ -44,12 +45,15 @@ func (s *Server) handleAdoptTenants(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	items, err := s.svc.AdoptTenants(r.Context(), body.Usernames, auditCtx(r))
+	// Adoption restarts each instance and waits for it to answer, so the page
+	// gets a job and polls it for per-account progress instead of holding one
+	// request open for the whole batch.
+	job, err := s.svc.AdoptTenantsAsync(r.Context(), body.Usernames, auditCtx(r))
 	if err != nil {
 		writeServiceErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	writeJSON(w, http.StatusAccepted, map[string]any{fieldJob: job})
 }
 
 func (s *Server) handleCreateTenant(w http.ResponseWriter, r *http.Request) {
@@ -68,12 +72,12 @@ func (s *Server) handleCreateTenant(w http.ResponseWriter, r *http.Request) {
 	// record and the password right away and can poll the list for the final
 	// status.
 	resp := map[string]any{
-		fieldTenant:   s.svc.TenantDTO(*t),
+		fieldTenant:   s.svc.TenantDTOFor(*t, r.Host),
 		fieldPassword: password,
 		"pending":     t.Status == domain.StatusCreating,
 	}
 	if err != nil {
-		resp["warning"] = err.Error()
+		resp[fieldWarning] = err.Error()
 	}
 	writeJSON(w, http.StatusCreated, resp)
 }
@@ -84,7 +88,7 @@ func (s *Server) handleGetTenant(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad_id", err.Error())
 		return
 	}
-	dto, err := s.svc.TenantDetail(id)
+	dto, err := s.svc.TenantDetailFor(id, r.Host)
 	if err != nil {
 		writeServiceErr(w, err)
 		return
@@ -108,7 +112,7 @@ func (s *Server) handleUpdateTenant(w http.ResponseWriter, r *http.Request) {
 		writeServiceErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{fieldTenant: s.svc.TenantDTO(*t)})
+	writeJSON(w, http.StatusOK, map[string]any{fieldTenant: s.svc.TenantDTOFor(*t, r.Host)})
 }
 
 func (s *Server) handleDeleteTenant(w http.ResponseWriter, r *http.Request) {
@@ -128,7 +132,7 @@ func (s *Server) handleDeleteTenant(w http.ResponseWriter, r *http.Request) {
 		writeServiceErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{fieldTenant: s.svc.TenantDTO(*t)})
+	writeJSON(w, http.StatusOK, map[string]any{fieldTenant: s.svc.TenantDTOFor(*t, r.Host)})
 }
 
 func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
@@ -160,7 +164,7 @@ func (s *Server) tenantAction(w http.ResponseWriter, r *http.Request, fn func(in
 		writeServiceErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{fieldTenant: s.svc.TenantDTO(*t)})
+	writeJSON(w, http.StatusOK, map[string]any{fieldTenant: s.svc.TenantDTOFor(*t, r.Host)})
 }
 
 func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
@@ -176,11 +180,53 @@ func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			fieldTenant: s.svc.TenantDTO(*t), fieldPassword: password, "warning": err.Error(),
+			fieldTenant: s.svc.TenantDTOFor(*t, r.Host), fieldPassword: password, fieldWarning: err.Error(),
 		})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{fieldTenant: s.svc.TenantDTO(*t), fieldPassword: password})
+	writeJSON(w, http.StatusOK, map[string]any{fieldTenant: s.svc.TenantDTOFor(*t, r.Host), fieldPassword: password})
+}
+
+func (s *Server) handleSSHStatus(w http.ResponseWriter, r *http.Request) {
+	st, err := s.svc.SSHStatus(r.Context())
+	if err != nil {
+		writeServiceErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": st,
+		"host":   s.svc.PublicHost(),
+	})
+}
+
+func (s *Server) handleTenantSSH(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_id", err.Error())
+		return
+	}
+	var body struct {
+		Enabled bool `json:"enabled"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	t, password, err := s.svc.SetTenantSSH(r.Context(), id, body.Enabled, auditCtx(r))
+	if err != nil {
+		if t == nil {
+			writeServiceErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			fieldTenant: s.svc.TenantDTOFor(*t, r.Host), fieldPassword: password, fieldWarning: err.Error(),
+		})
+		return
+	}
+	resp := map[string]any{fieldTenant: s.svc.TenantDTOFor(*t, r.Host)}
+	if password != "" {
+		resp[fieldPassword] = password
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleRepair(w http.ResponseWriter, r *http.Request) {
@@ -196,15 +242,29 @@ func (s *Server) handleRepair(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			fieldTenant: s.svc.TenantDTO(*t), fieldPassword: password, "warning": err.Error(),
+			fieldTenant: s.svc.TenantDTOFor(*t, r.Host), fieldPassword: password, fieldWarning: err.Error(),
 		})
 		return
 	}
-	resp := map[string]any{"tenant": s.svc.TenantDTO(*t)}
+	resp := map[string]any{"tenant": s.svc.TenantDTOFor(*t, r.Host)}
 	if password != "" {
 		resp["password"] = password
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleRefreshDisk(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_id", err.Error())
+		return
+	}
+	t, err := s.svc.RefreshTenantDisk(r.Context(), id, auditCtx(r))
+	if err != nil {
+		writeServiceErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{fieldTenant: s.svc.TenantDTOFor(*t, r.Host)})
 }
 
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
@@ -241,19 +301,41 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"metrics": s.svc.GetMetrics(id),
-		"tenant":  s.svc.TenantDTO(*t),
+		"tenant":  s.svc.TenantDTOFor(*t, r.Host),
 	})
 }
 
-func (s *Server) handleBulk(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Action string  `json:"action"`
-		IDs    []int64 `json:"ids"`
+// handleMetricHistory returns the usage trend for one tenant. window is a Go
+// duration such as 24h or 168h; the service clamps it to one week.
+func (s *Server) handleMetricHistory(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_id", err.Error())
+		return
 	}
+	window := 24 * time.Hour
+	if raw := r.URL.Query().Get("window"); raw != "" {
+		parsed, parseErr := time.ParseDuration(raw)
+		if parseErr != nil {
+			writeErr(w, http.StatusBadRequest, "bad_window", "时间范围格式不对，例如 24h 或 168h")
+			return
+		}
+		window = parsed
+	}
+	samples, err := s.svc.MetricHistory(id, window)
+	if err != nil {
+		writeServiceErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{fieldItems: samples, "window": window.String()})
+}
+
+func (s *Server) handleBulk(w http.ResponseWriter, r *http.Request) {
+	var body fleet.BulkRequest
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	job, err := s.svc.BulkAction(r.Context(), body.Action, body.IDs, auditCtx(r))
+	job, err := s.svc.Bulk(r.Context(), body, auditCtx(r))
 	if err != nil {
 		writeServiceErr(w, err)
 		return
@@ -305,7 +387,7 @@ func (s *Server) handleRestoreBackup(w http.ResponseWriter, r *http.Request) {
 		writeServiceErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{fieldTenant: s.svc.TenantDTO(*t)})
+	writeJSON(w, http.StatusOK, map[string]any{fieldTenant: s.svc.TenantDTOFor(*t, r.Host)})
 }
 
 func (s *Server) handleDeleteBackup(w http.ResponseWriter, r *http.Request) {
@@ -372,11 +454,11 @@ func (s *Server) handleRestoreTrash(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			fieldTenant: s.svc.TenantDTO(*t), fieldPassword: password, "warning": err.Error(),
+			fieldTenant: s.svc.TenantDTOFor(*t, r.Host), fieldPassword: password, fieldWarning: err.Error(),
 		})
 		return
 	}
-	resp := map[string]any{"tenant": s.svc.TenantDTO(*t)}
+	resp := map[string]any{"tenant": s.svc.TenantDTOFor(*t, r.Host)}
 	if password != "" {
 		resp["password"] = password
 	}

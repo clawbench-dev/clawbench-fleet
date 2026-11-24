@@ -2,6 +2,9 @@ package fleet
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"log"
 	"time"
 
 	"clawbench-fleet/internal/domain"
@@ -12,6 +15,74 @@ func (s *Service) Run(ctx context.Context) {
 	go s.healthLoop(ctx)
 	go s.metricsLoop(ctx)
 	go s.dailyLoop(ctx)
+	// Disk usage used to have its own five-minute loop, but that walked every
+	// home directory of every tenant and mostly did nothing: the samples are
+	// written to SQLite and only refreshed at 04:00 by dailyLoop. Sizes are now
+	// measured on demand — the 04:00 sweep, the instance detail page, the
+	// start path and the manual refresh button — and the limit is enforced as
+	// part of those paths (see enforceDiskLimits).
+}
+
+// enforceDiskLimits measures every running tenant that has a limit and stops
+// the ones that went over. It is no longer on a timer: the daily sweep and the
+// manual refresh call it, so a tenant is checked whenever its size is known.
+func (s *Service) enforceDiskLimits(ctx context.Context) {
+	tenants, err := s.allTenants()
+	if err != nil {
+		return
+	}
+	for i := range tenants {
+		t := tenants[i]
+		if t.Status != domain.StatusRunning || t.DiskQuotaGB <= 0 {
+			continue
+		}
+		unlock, ok := s.locks.TryLock(t.Username)
+		if !ok {
+			continue
+		}
+		checkCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		size, sizeErr := s.Sys.DiskUsage(checkCtx, t.HomeDir)
+		cancel()
+		if sizeErr != nil {
+			// A failed measurement must not be silent: the row keeps showing the
+			// old value, and a tenant that was never measured shows 0 B, which
+			// reads like an empty directory. Log it once per tenant per day so a
+			// permanently broken path is visible without flooding the log.
+			s.logDiskFailure(t, sizeErr)
+			unlock()
+			continue
+		}
+		t.DiskBytes = size
+		_ = s.Store.SetTenantDisk(t.ID, size, time.Now().Format(time.RFC3339))
+		if diskOverLimit(&t, size) {
+			s.enforceDiskLimit(ctx, &t)
+		}
+		unlock()
+	}
+}
+
+// logDiskFailure records a measurement error at most once per tenant per day.
+// The message carries the tenant and the error the du call returned.
+func (s *Service) logDiskFailure(t domain.Tenant, err error) {
+	if !s.shouldLogDiskFailure(t.Username) {
+		return
+	}
+	log.Printf("磁盘统计失败 username=%s home=%s err=%v", t.Username, t.HomeDir, err)
+}
+
+// shouldLogDiskFailure reports whether this tenant's failure still needs a log
+// line today. A permanently broken home directory would otherwise write one
+// line per sweep forever.
+func (s *Service) shouldLogDiskFailure(username string) bool {
+	day := time.Now().Format("20060102")
+	key := "diskfail:" + username
+	s.dailyMu.Lock()
+	defer s.dailyMu.Unlock()
+	if s.lastDaily[key] == day {
+		return false
+	}
+	s.lastDaily[key] = day
+	return true
 }
 
 func (s *Service) healthLoop(ctx context.Context) {
@@ -80,8 +151,60 @@ func (s *Service) metricsLoop(ctx context.Context) {
 		case <-timer.C:
 		}
 		s.RefreshMetrics(ctx)
+		s.recordMetricSamples(ctx)
 		timer.Reset(10 * time.Second)
 	}
+}
+
+// recordMetricSamples appends one history point per running tenant every five
+// minutes. That is frequent enough to see a spike after the fact and cheap
+// enough to keep for a week.
+func (s *Service) recordMetricSamples(ctx context.Context) {
+	if time.Since(s.lastSample) < sampleInterval {
+		return
+	}
+	s.lastSample = time.Now()
+	at := s.lastSample.Format(time.RFC3339)
+	tenants, err := s.Store.ListTenantsByStatus(domain.StatusRunning)
+	if err != nil {
+		return
+	}
+	for _, t := range tenants {
+		m := s.GetMetrics(t.ID)
+		_ = s.Store.AddMetricSample(t.ID, domain.MetricSample{
+			At:          at,
+			CPUPercent:  m.CPUPercent,
+			MemoryBytes: m.MemoryBytes,
+			PIDs:        m.PIDs,
+			DiskBytes:   t.DiskBytes,
+		})
+	}
+	s.purgeMetricSamples(ctx)
+}
+
+// purgeMetricSamples drops history older than the retention window once a day.
+func (s *Service) purgeMetricSamples(ctx context.Context) {
+	retention := s.Settings().MetricsRetention
+	if retention <= 0 || !s.shouldRun("metrics", 4) {
+		return
+	}
+	cutoff := time.Now().Add(-time.Duration(retention) * 24 * time.Hour)
+	_, _ = s.Store.PurgeMetricSamples(cutoff)
+	_ = ctx
+}
+
+// MetricHistory returns the usage history for one tenant over the last window.
+func (s *Service) MetricHistory(id int64, window time.Duration) ([]domain.MetricSample, error) {
+	if _, err := s.tenantByID(id); err != nil {
+		return nil, err
+	}
+	if window <= 0 {
+		window = 24 * time.Hour
+	}
+	if window > 7*24*time.Hour {
+		window = 7 * 24 * time.Hour
+	}
+	return s.Store.MetricHistory(id, time.Now().Add(-window), 5000)
 }
 
 func (s *Service) RefreshMetrics(ctx context.Context) {
@@ -115,6 +238,7 @@ func (s *Service) RefreshDiskUsage(ctx context.Context) {
 		}
 		size, err := s.Sys.DiskUsage(ctx, t.HomeDir)
 		if err != nil {
+			s.logDiskFailure(t, err)
 			continue
 		}
 		_ = s.Store.SetTenantDisk(t.ID, size, time.Now().Format(time.RFC3339))
@@ -124,6 +248,57 @@ func (s *Service) RefreshDiskUsage(ctx context.Context) {
 		s.metrics[t.ID] = m
 		s.metricsMu.Unlock()
 	}
+}
+
+// RefreshTenantDisk measures one tenant right now and stores the result. It
+// backs the manual refresh button: the daily sweep is the only scheduled
+// measurement left, so an admin who just cleaned up a home directory should not
+// have to wait for 04:00 to see the new number.
+func (s *Service) RefreshTenantDisk(ctx context.Context, id int64, ac AuditContext) (*domain.Tenant, error) {
+	t, err := s.tenantByID(id)
+	if err != nil {
+		return nil, err
+	}
+	if t.Status == domain.StatusTrashed {
+		return nil, errors.New("回收站里的实例不统计磁盘")
+	}
+	unlock, ok := s.locks.TryLock(t.Username)
+	if !ok {
+		return nil, errors.New("该实例正在执行其他操作，请稍后重试")
+	}
+	defer unlock()
+
+	measureCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	size, err := s.Sys.DiskUsage(measureCtx, t.HomeDir)
+	if err != nil {
+		s.logDiskFailure(*t, err)
+		s.Audit(ac, "tenant.disk_refresh", t, map[string]any{"disk_bytes": t.DiskBytes}, err)
+		return nil, fmt.Errorf("统计磁盘失败：%w", err)
+	}
+	at := time.Now().Format(time.RFC3339)
+	if err := s.Store.SetTenantDisk(t.ID, size, at); err != nil {
+		return nil, err
+	}
+	s.metricsMu.Lock()
+	m := s.metrics[t.ID]
+	m.DiskBytes = size
+	s.metrics[t.ID] = m
+	s.metricsMu.Unlock()
+
+	s.Audit(ac, "tenant.disk_refresh", t, map[string]any{"disk_bytes": size}, nil)
+
+	t.DiskBytes = size
+	t.DiskChecked = at
+	// Measuring is also the moment to enforce the limit, so a tenant that just
+	// went over is stopped as soon as anyone looks at it.
+	if t.Status == domain.StatusRunning && diskOverLimit(t, size) {
+		s.enforceDiskLimit(ctx, t)
+		if fresh, err := s.tenantByID(id); err == nil {
+			return fresh, nil
+		}
+	}
+	return t, nil
 }
 
 func (s *Service) dailyLoop(ctx context.Context) {

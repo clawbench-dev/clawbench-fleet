@@ -242,3 +242,28 @@ func TestClosedStoreRecordErrors(t *testing.T) {
 		t.Fatal("save settings on a closed store should fail")
 	}
 }
+
+// TestClosedStoreConfigAndListErrors covers the settings and tenant-list reads
+// the platform makes on every page load. A failed query there has to surface as
+// an error rather than an empty list, or the UI would show "no tenants" while
+// the database is actually broken.
+func TestClosedStoreConfigAndListErrors(t *testing.T) {
+	st := closedStore(t)
+	if _, err := st.LoadTenantConfig(); err == nil {
+		t.Fatal("loading the unified config from a closed store should fail")
+	}
+	if err := st.SaveTenantConfig([]domain.ConfigEntry{{Key: "a", Value: "b"}}); err == nil {
+		t.Fatal("saving the unified config to a closed store should fail")
+	}
+	filters := []TenantFilter{
+		{},
+		{Status: domain.StatusRunning},
+		{IncludeTrashed: true, Query: "ali"},
+		{HideDeleting: true, SkipNotes: true, Query: "ali"},
+	}
+	for _, f := range filters {
+		if _, _, err := st.ListTenants(f); err == nil {
+			t.Fatalf("listing tenants with %+v on a closed store should fail", f)
+		}
+	}
+}

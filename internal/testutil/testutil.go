@@ -5,6 +5,7 @@ package testutil
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"path/filepath"
 	"testing"
@@ -33,6 +34,39 @@ func FreePort(t *testing.T) int {
 	return port
 }
 
+// FreePortRun asks the kernel for a run of n consecutive unused TCP ports and
+// returns the first one. A single free port is not enough for a port range:
+// the neighbors may be taken, and then the simulated instance fails to bind
+// for a reason that has nothing to do with the test.
+func FreePortRun(t *testing.T, n int) int {
+	t.Helper()
+	for range 30 {
+		base := FreePort(t)
+		if base+n-1 > 65535 {
+			continue
+		}
+		held := make([]net.Listener, 0, n-1)
+		free := true
+		for p := base + 1; p < base+n; p++ {
+			var lc net.ListenConfig
+			ln, err := lc.Listen(context.Background(), "tcp", fmt.Sprintf("127.0.0.1:%d", p))
+			if err != nil {
+				free = false
+				break
+			}
+			held = append(held, ln)
+		}
+		for _, ln := range held {
+			_ = ln.Close()
+		}
+		if free {
+			return base
+		}
+	}
+	t.Fatal("找不到连续的空闲端口")
+	return 0
+}
+
 // Platform is one isolated platform instance owned by a test.
 type Platform struct {
 	Svc   *fleet.Service
@@ -49,7 +83,7 @@ func New(t *testing.T) *Platform {
 	cfg := config.Default()
 	cfg.DataDir = filepath.Join(dir, "data")
 	cfg.Clawbench.InstallDir = filepath.Join(dir, "opt")
-	port := FreePort(t)
+	port := FreePortRun(t, 3)
 	cfg.Clawbench.PortStart = port
 	cfg.Clawbench.PortEnd = port + 2
 	cfg.Clawbench.PortsPerTenant = 1
@@ -58,6 +92,10 @@ func New(t *testing.T) *Platform {
 	cfg.System.HomeRoot = filepath.Join(cfg.DataDir, "dev", "homes")
 	cfg.System.SystemdDir = filepath.Join(cfg.DataDir, "dev", "units")
 	cfg.Backup.Enabled = false
+	// Certificate distribution writes extra files into each tenant's config
+	// directory. Tests that do not specifically cover TLS use plain HTTP so
+	// the temp-dir cleanup is not racing a background write.
+	cfg.TenantTLS.Enabled = false
 	if err := cfg.Normalize(); err != nil {
 		t.Fatalf("normalize: %v", err)
 	}

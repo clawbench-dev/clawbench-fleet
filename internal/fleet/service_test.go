@@ -35,13 +35,51 @@ func freePort(t *testing.T) int {
 	return port
 }
 
+// freePortRun returns the first of two consecutive free ports. The test config
+// hands out a range of two, and a range that straddles an occupied port makes
+// the simulated instance fail to bind for reasons unrelated to the test.
+func freePortRun(t *testing.T, n int) int {
+	t.Helper()
+	for range 30 {
+		base := freePort(t)
+		if base+n-1 > 65535 {
+			continue
+		}
+		held := make([]net.Listener, 0, n-1)
+		free := true
+		for p := base + 1; p < base+n; p++ {
+			ln, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(p))
+			if err != nil {
+				free = false
+				break
+			}
+			held = append(held, ln)
+		}
+		for _, ln := range held {
+			_ = ln.Close()
+		}
+		if free {
+			return base
+		}
+	}
+	t.Fatal("找不到连续的空闲端口")
+	return 0
+}
+
 func newTestService(t *testing.T) (*Service, config.Config) {
+	t.Helper()
+	return newTestServiceWith(t, nil)
+}
+
+// newTestServiceWith lets a test wrap the simulated system, e.g. to record
+// the shell and password calls SSH provisioning makes.
+func newTestServiceWith(t *testing.T, wrap func(sysops.System) sysops.System) (*Service, config.Config) {
 	t.Helper()
 	dir := t.TempDir()
 	cfg := config.Default()
 	cfg.DataDir = filepath.Join(dir, "data")
 	cfg.Clawbench.InstallDir = filepath.Join(dir, "opt")
-	port := freePort(t)
+	port := freePortRun(t, 2)
 	cfg.Clawbench.PortStart = port
 	cfg.Clawbench.PortEnd = port + 1
 	cfg.Clawbench.PortsPerTenant = 1
@@ -61,7 +99,10 @@ func newTestService(t *testing.T) (*Service, config.Config) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	sys := sysops.NewFake(filepath.Join(cfg.DataDir, "dev"), cfg.Clawbench.InstallDir)
+	var sys sysops.System = sysops.NewFake(filepath.Join(cfg.DataDir, "dev"), cfg.Clawbench.InstallDir)
+	if wrap != nil {
+		sys = wrap(sys)
+	}
 	svc, err := New(cfg, st, sys)
 	if err != nil {
 		t.Fatal(err)
@@ -76,6 +117,7 @@ func TestTenantLifecycle(t *testing.T) {
 
 	tenant, password, err := svc.CreateTenant(ctx, CreateTenantInput{
 		Username: "alice", DisplayName: "张三", Notes: "研发部",
+		SSHEnabled: boolPtr(false),
 	}, ac)
 	if err != nil {
 		t.Fatalf("create: %v", err)
@@ -106,10 +148,15 @@ func TestTenantLifecycle(t *testing.T) {
 		t.Fatalf("read unit: %v", err)
 	}
 	unit := string(unitData)
-	for _, want := range []string{"User=alice", "--managed", "--port " + strconv.Itoa(tenant.Port), "CPUQuota=200%", "MemoryMax=4G"} {
+	for _, want := range []string{"User=alice", "--port " + strconv.Itoa(tenant.Port), "CPUQuota=200%", "MemoryMax=4G"} {
 		if !strings.Contains(unit, want) {
 			t.Fatalf("unit missing %q:\n%s", want, unit)
 		}
+	}
+	// --managed would also hide the in-app restart, which tenants are allowed
+	// to use: systemd brings the process back either way.
+	if strings.Contains(unit, "--managed") {
+		t.Fatalf("unit must not pass --managed:\n%s", unit)
 	}
 
 	if info, err := svc.healthCheck(ctx, tenant.Port); err != nil || info.App != "clawbench" {
@@ -221,8 +268,16 @@ func TestTenantLifecycle(t *testing.T) {
 	if _, err := svc.DeleteTenant(ctx, tenant.ID, "alice", ac); err != nil {
 		t.Fatalf("delete again: %v", err)
 	}
+	// Usage history has no foreign key, so purging the tenant has to remove it.
+	at := time.Now().Format(time.RFC3339)
+	if err := svc.Store.AddMetricSample(tenant.ID, domain.MetricSample{At: at, CPUPercent: 1}); err != nil {
+		t.Fatal(err)
+	}
 	if err := svc.PurgeTenant(ctx, tenant.ID, ac); err != nil {
 		t.Fatalf("purge: %v", err)
+	}
+	if samples, err := svc.Store.MetricHistory(tenant.ID, time.Now().Add(-time.Hour), 10); err != nil || len(samples) != 0 {
+		t.Fatalf("metric samples outlived the tenant: %+v %v", samples, err)
 	}
 	if _, svc := svc.GetTenant(tenant.ID); svc == nil {
 		t.Fatal("tenant still exists after purge")

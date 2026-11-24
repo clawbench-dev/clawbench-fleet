@@ -15,10 +15,10 @@ func TestProtectedUsername(t *testing.T) {
 
 func TestTenantAddress(t *testing.T) {
 	tenant := Tenant{Port: 21000}
-	if got := tenant.Address(""); got != "http://127.0.0.1:21000" {
+	if got := tenant.Address(""); got != "https://127.0.0.1:21000" {
 		t.Fatalf("default host address = %q", got)
 	}
-	if got := tenant.Address("10.0.0.5"); got != "http://10.0.0.5:21000" {
+	if got := tenant.Address("10.0.0.5"); got != "https://10.0.0.5:21000" {
 		t.Fatalf("explicit host address = %q", got)
 	}
 }

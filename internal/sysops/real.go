@@ -86,6 +86,182 @@ func (r *Real) DeleteUser(ctx context.Context, username string) error {
 	return err
 }
 
+// SetPassword feeds chpasswd through stdin so the password never shows up in
+// the process list. chpasswd also updates /etc/shadow atomically.
+func (r *Real) SetPassword(ctx context.Context, username, password string) error {
+	if strings.ContainsAny(password, ":\n\r") {
+		return errors.New("密码里不能包含冒号或换行")
+	}
+	_, err := runInput(ctx, 30*time.Second, username+":"+password+"\n", "chpasswd")
+	return err
+}
+
+func (r *Real) SetShell(ctx context.Context, username, shell string) error {
+	_, err := run(ctx, "usermod", "-s", shell, username)
+	return err
+}
+
+func (r *Real) LockPassword(ctx context.Context, username string) error {
+	_, err := run(ctx, "passwd", "-l", username)
+	return err
+}
+
+// KillUserProcesses ends every process of the account so it can no longer
+// write to disk. The lookups are done once, not per process, because scanning
+// /proc for a large account gets slow.
+func (r *Real) KillUserProcesses(ctx context.Context, username string) error {
+	uid, _, err := r.LookupIDs(ctx, username)
+	if err != nil {
+		// A missing account has nothing to kill; anything else (a real command
+		// failure) is passed on.
+		exists, existsErr := r.UserExists(ctx, username)
+		if existsErr == nil && !exists {
+			return nil
+		}
+		return err
+	}
+	if uid <= 0 {
+		return nil
+	}
+	if err := killUserProcs(ctx, uid, syscall.SIGTERM); err != nil {
+		return err
+	}
+	if err := waitUserProcsGone(ctx, uid, 50); err == nil {
+		return nil
+	}
+	if err := killUserProcs(ctx, uid, syscall.SIGKILL); err != nil {
+		return err
+	}
+	return waitUserProcsGone(ctx, uid, 25)
+}
+
+func killUserProcs(ctx context.Context, uid int, sig syscall.Signal) error {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if processOwnedBy(pid, uid) {
+			_ = syscall.Kill(pid, sig)
+		}
+	}
+	return nil
+}
+
+func waitUserProcsGone(ctx context.Context, uid, attempts int) error {
+	for range attempts {
+		if !userHasProcesses(uid) {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+	return fmt.Errorf("账号还有进程没停下来")
+}
+
+// userHasProcesses ignores zombies: they no longer write to disk, and without
+// a reaper they can linger for a while.
+func userHasProcesses(uid int) bool {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+		if processOwnedBy(pid, uid) && !isZombie(pid) {
+			return true
+		}
+	}
+	return false
+}
+
+func isZombie(pid int) bool {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return true
+	}
+	fields := strings.Fields(string(data))
+	return len(fields) > 2 && fields[2] == "Z"
+}
+
+// SSHStatus reads sshd's effective configuration with -T, which already
+// accounts for files under sshd_config.d and Match blocks. A missing or
+// misconfigured sshd is reported as a status, not an error: the platform must
+// keep working on machines where SSH is intentionally absent.
+func (r *Real) SSHStatus(ctx context.Context) (SSHStatus, error) {
+	st := SSHStatus{Port: 22}
+	sshd, ok := findSSHD()
+	if !ok {
+		st.Problem = "服务器上没有安装 sshd，员工无法通过 SSH 登录"
+		return st, nil
+	}
+	st.Installed = true
+	st.Running = sshdRunning(ctx)
+	out, err := run(ctx, sshd, "-T")
+	if err != nil {
+		st.Problem = "读取 sshd 配置失败，请确认平台以 root 运行且 sshd 配置正确"
+		return st, nil //nolint:nilerr // a broken sshd is a status the UI shows, not a platform failure
+	}
+	for _, line := range strings.Split(out, "\n") {
+		key, value, found := strings.Cut(strings.TrimSpace(line), " ")
+		if !found {
+			continue
+		}
+		switch key {
+		case "passwordauthentication":
+			st.PasswordAuth = value == "yes"
+		case "port":
+			if port, convErr := strconv.Atoi(value); convErr == nil {
+				st.Port = port
+			}
+		}
+	}
+	switch {
+	case !st.Running:
+		st.Problem = "sshd 没有在运行，员工暂时无法通过 SSH 登录"
+	case !st.PasswordAuth:
+		st.Problem = "sshd 关闭了密码登录（PasswordAuthentication no），员工无法用密码 SSH 登录"
+	}
+	return st, nil
+}
+
+func findSSHD() (string, bool) {
+	if path, err := exec.LookPath("sshd"); err == nil {
+		return path, true
+	}
+	for _, path := range []string{"/usr/sbin/sshd", "/sbin/sshd", "/usr/local/sbin/sshd"} {
+		if _, err := os.Stat(path); err == nil {
+			return path, true
+		}
+	}
+	return "", false
+}
+
+func sshdRunning(ctx context.Context) bool {
+	for _, unit := range []string{"ssh", "sshd"} {
+		out, err := run(ctx, "systemctl", "is-active", unit)
+		if err == nil && strings.TrimSpace(out) == "active" {
+			return true
+		}
+	}
+	// No systemd (containers, unusual distros): a listening port is the best
+	// signal available without parsing ps.
+	return portOpen(22)
+}
+
 func (r *Real) LookupIDs(ctx context.Context, username string) (int, int, error) {
 	uidOut, err := run(ctx, "id", "-u", username)
 	if err != nil {
@@ -165,6 +341,82 @@ func (r *Real) StopPortOwner(ctx context.Context, port int, username string) err
 		return nil
 	}
 	return fmt.Errorf("端口 %d 上的进程停不下来", port)
+}
+
+// PortHolders lists the processes of username listening on port. The platform
+// itself is usually root, so "owned by username" alone would never match it;
+// the running process is marked instead, which is what lets the caller stop
+// exactly the hand-started instance it is replacing.
+func (r *Real) PortHolders(ctx context.Context, port int, username string) ([]PortHolder, error) {
+	// Port 0 would turn the ss filter into "every listening socket", and the
+	// caller kills what it gets back. A typo in the listen address must not
+	// turn into "stop every server on the machine".
+	if port < 1 || port > 65535 {
+		return nil, fmt.Errorf("端口 %d 不合法，无法判断谁在监听", port)
+	}
+	uid, _, err := r.LookupIDs(ctx, username)
+	if err != nil {
+		return nil, err
+	}
+	out, err := run(ctx, "ss", "-ltnp", fmt.Sprintf("sport = :%d", port))
+	if err != nil {
+		return nil, err
+	}
+	self := os.Getpid()
+	var holders []PortHolder
+	for _, m := range ssPidRe.FindAllStringSubmatch(out, -1) {
+		pid, convErr := strconv.Atoi(m[1])
+		if convErr != nil {
+			continue
+		}
+		if pid != self && !processOwnedBy(pid, uid) {
+			continue
+		}
+		holders = append(holders, PortHolder{PID: pid, Self: pid == self})
+	}
+	return holders, nil
+}
+
+// KillProcess sends SIGTERM and waits a moment before resorting to SIGKILL. The
+// platform uses it only on the process holding its own port, so a graceful stop
+// is what leaves the port free for systemd to bind immediately.
+//
+// A process that has exited but not been reaped yet is a zombie: it no longer
+// holds any port, and signaling 0 still succeeds on it. isZombie is therefore
+// part of "gone", otherwise a stop would always wait out the full grace period.
+func (r *Real) KillProcess(ctx context.Context, pid int) error {
+	if pid <= 0 {
+		return fmt.Errorf("进程号 %d 无效", pid)
+	}
+	if pid == os.Getpid() {
+		return errors.New("不会停掉正在运行这次操作的进程")
+	}
+	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return err
+	}
+	for range 50 {
+		if processGone(pid) {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return err
+	}
+	return nil
+}
+
+// processGone reports whether pid no longer holds anything: it is either off
+// the process table or waiting to be reaped.
+func processGone(pid int) bool {
+	if errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
+		return true
+	}
+	return isZombie(pid)
 }
 
 // waitPortClosed polls until nothing listens on port, at most attempts times.
@@ -367,7 +619,7 @@ func (r *Real) Enable(ctx context.Context, unit string) error {
 
 func (r *Real) Disable(ctx context.Context, unit string) error {
 	_, err := run(ctx, "systemctl", "disable", unit)
-	return err
+	return ignoreMissingUnit(err)
 }
 
 func (r *Real) Start(ctx context.Context, unit string) error {
@@ -377,6 +629,17 @@ func (r *Real) Start(ctx context.Context, unit string) error {
 
 func (r *Real) Stop(ctx context.Context, unit string) error {
 	_, err := run(ctx, "systemctl", "stop", unit)
+	return ignoreMissingUnit(err)
+}
+
+// ignoreMissingUnit treats "this unit is not loaded" as success. systemd says so
+// when the unit file is already gone, which is exactly the state we want after
+// stopping or disabling it, so failing there would block the rest of the work.
+func ignoreMissingUnit(err error) error {
+	var cmdErr *CommandError
+	if errors.As(err, &cmdErr) && strings.Contains(cmdErr.Stderr, "not loaded") {
+		return nil
+	}
 	return err
 }
 
@@ -456,7 +719,11 @@ func (r *Real) DiskUsage(ctx context.Context, path string) (int64, error) {
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
 		return 0, nil
 	}
-	out, err := run(ctx, "du", "-sb", "--", path)
+	// -x keeps du on the home directory's own filesystem. Without it a mount
+	// point inside the home (or, worse, the home itself being a mount) drags in
+	// whatever else lives on that device. -b counts apparent bytes, so the
+	// number matches what the files claim to be rather than the blocks used.
+	out, err := run(ctx, "du", "-sbx", "--", path)
 	if err != nil {
 		return 0, err
 	}

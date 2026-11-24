@@ -83,6 +83,57 @@ func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]any{fieldJob: job})
 }
 
+func (s *Server) handleSelfInfo(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.svc.SelfUpgradeInfo())
+}
+
+// handleSelfAdopt writes the platform's own systemd unit, enables it and
+// restarts through it. Like the self upgrade, the reply is written before the
+// process goes away: the page then waits for /api/health instead of treating
+// the dropped connection as a failure.
+func (s *Server) handleSelfAdopt(w http.ResponseWriter, r *http.Request) {
+	res, err := s.svc.AdoptSelf(r.Context(), auditCtx(r))
+	if err != nil && (res == nil || !res.Restarting) {
+		writeServiceErr(w, err)
+		return
+	}
+	body := map[string]any{"result": res, "restarting": res.Restarting}
+	if err != nil {
+		body["warning"] = err.Error()
+	}
+	writeJSON(w, http.StatusAccepted, body)
+}
+
+// handleSelfUpgrade replaces the platform binary and restarts the service.
+// The reply is written before the restart so the browser knows the dropped
+// connection is expected; the page then waits for /api/health to answer again.
+func (s *Server) handleSelfUpgrade(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 600<<20)
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_upload", "读取上传文件失败："+err.Error())
+		return
+	}
+	file, _, err := r.FormFile("file")
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_upload", "请选择平台程序的二进制文件")
+		return
+	}
+	defer func() { _ = file.Close() }()
+	res, err := s.svc.UploadSelf(r.Context(), file, 600<<20, auditCtx(r))
+	if err != nil && (res == nil || !res.Restarting) {
+		writeServiceErr(w, err)
+		return
+	}
+	// res.Restarting means the swap succeeded; a non-nil error then only says
+	// the automatic restart did not go through, and the operator still needs
+	// the paths and the version to finish by hand.
+	body := map[string]any{"result": res, "restarting": res.Restarting}
+	if err != nil {
+		body["warning"] = err.Error()
+	}
+	writeJSON(w, http.StatusAccepted, body)
+}
+
 func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
 	id, err := pathID(r)
 	if err != nil {
@@ -108,13 +159,16 @@ func (s *Server) handleJobArtifact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := r.PathValue("name")
-	if name != "success.csv" && name != "failures.csv" {
+	// Import jobs offer success/failure lists; a batch password reset offers
+	// the generated passwords. Anything else is not a file this platform
+	// produces.
+	if name != "success.csv" && name != "failures.csv" && name != "passwords.csv" {
 		writeErr(w, http.StatusNotFound, "not_found", "没有这个结果文件")
 		return
 	}
 	data, ok := s.svc.Artifact(id, name)
 	if !ok {
-		writeErr(w, http.StatusNotFound, "not_found", "结果文件已过期，请重新导入")
+		writeErr(w, http.StatusNotFound, "not_found", "结果文件已过期，请重新执行")
 		return
 	}
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")

@@ -3,6 +3,9 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   ChevronLeft,
   ChevronRight,
+  Download,
+  Gauge,
+  KeyRound,
   Play,
   Plus,
   RefreshCw,
@@ -12,13 +15,13 @@ import {
   Square,
   Upload,
 } from 'lucide-vue-next'
+import { downloadFile } from '../api'
 import { api, errorMessage } from '../api'
 import EmptyState from '../components/EmptyState.vue'
 import Modal from '../components/Modal.vue'
-import StatusBadge from '../components/StatusBadge.vue'
+import TenantTable from '../components/TenantTable.vue'
 import { toast } from '../stores/toast'
-import type { AdoptCandidate, AdoptResult, Job, Page, Tenant } from '../types'
-import { formatAgo, formatBytes, formatPercent, formatTime } from '../utils'
+import type { AdoptCandidate, Job, Page, Tenant } from '../types'
 
 const items = ref<Tenant[]>([])
 const total = ref(0)
@@ -31,14 +34,16 @@ const selected = ref<number[]>([])
 
 const scanOpen = ref(false)
 const scanning = ref(false)
-const adopting = ref(false)
+const adoptStarting = ref(false)
 const candidates = ref<AdoptCandidate[]>([])
 const scanPicked = ref<string[]>([])
 const scanError = ref('')
+const adoptJob = ref<Job | null>(null)
 
 let pollTimer = 0
 let searchTimer = 0
 let jobTimer = 0
+let adoptTimer = 0
 
 async function load(silent = false) {
   if (!silent) loading.value = true
@@ -66,6 +71,8 @@ onBeforeUnmount(() => {
   window.clearInterval(pollTimer)
   window.clearInterval(searchTimer)
   window.clearInterval(jobTimer)
+  window.clearInterval(adoptTimer)
+  window.clearInterval(resetTimer)
 })
 
 watch([q, status], () => {
@@ -116,6 +123,90 @@ async function bulk(action: 'start' | 'stop' | 'restart') {
   }
 }
 
+const quotaOpen = ref(false)
+const quotaBusy = ref(false)
+const quotaError = ref('')
+const quotaDraft = ref({ cpu_quota: '200%', memory_max: '4G', tasks_max: 512, disk_quota_gb: 0 })
+
+function openQuota() {
+  quotaError.value = ''
+  quotaOpen.value = true
+}
+
+async function submitQuota() {
+  quotaError.value = ''
+  quotaBusy.value = true
+  try {
+    const res = await api.post<{ job: Job }>('/tenants/bulk', {
+      action: 'quota',
+      ids: selected.value,
+      ...quotaDraft.value,
+    })
+    quotaOpen.value = false
+    toast(`已开始给 ${selected.value.length} 个实例改配额`, 'success')
+    selected.value = []
+    watchJob(res.job.id)
+    load(true)
+  } catch (e) {
+    quotaError.value = errorMessage(e, '改配额失败')
+  } finally {
+    quotaBusy.value = false
+  }
+}
+
+const resetOpen = ref(false)
+const resetBusy = ref(false)
+const resetError = ref('')
+const resetDone = ref<Job | null>(null)
+
+function openReset() {
+  resetError.value = ''
+  resetDone.value = null
+  resetOpen.value = true
+}
+
+async function submitReset() {
+  resetError.value = ''
+  resetBusy.value = true
+  try {
+    const res = await api.post<{ job: Job }>('/tenants/bulk', {
+      action: 'reset-password',
+      ids: selected.value,
+    })
+    toast(`已开始重置 ${selected.value.length} 个账号的密码`, 'success')
+    selected.value = []
+    resetDone.value = res.job
+    pollReset(res.job.id)
+  } catch (e) {
+    resetError.value = errorMessage(e, '重置密码失败')
+  } finally {
+    resetBusy.value = false
+  }
+}
+
+let resetTimer = 0
+function pollReset(id: number) {
+  window.clearInterval(resetTimer)
+  resetTimer = window.setInterval(async () => {
+    try {
+      const res = await api.get<{ job: Job }>(`/jobs/${id}`)
+      resetDone.value = res.job
+      if (['succeeded', 'failed', 'partial'].includes(res.job.status)) {
+        window.clearInterval(resetTimer)
+        load(true)
+      }
+    } catch {
+      window.clearInterval(resetTimer)
+    }
+  }, 1000)
+}
+
+function downloadPasswords(job: Job) {
+  downloadFile(`/jobs/${job.id}/artifacts/passwords.csv`, `新密码-${job.id}.csv`).catch((e) =>
+    toast(errorMessage(e, '下载失败'), 'error'),
+  )
+}
+
 function watchJob(id: number) {
   window.clearInterval(jobTimer)
   jobTimer = window.setInterval(async () => {
@@ -142,6 +233,8 @@ async function openScan() {
   candidates.value = []
   scanPicked.value = []
   scanError.value = ''
+  adoptJob.value = null
+  window.clearInterval(adoptTimer)
   scanning.value = true
   try {
     const res = await api.get<{ items: AdoptCandidate[] }>('/tenants/scan')
@@ -152,6 +245,15 @@ async function openScan() {
   } finally {
     scanning.value = false
   }
+}
+
+function closeScan() {
+  if (adoptRunning.value) {
+    toast('纳入在后台继续，完成后列表会自动刷新', 'info')
+  }
+  window.clearInterval(adoptTimer)
+  scanOpen.value = false
+  adoptJob.value = null
 }
 
 function scanSelectable(c: AdoptCandidate) {
@@ -179,30 +281,79 @@ function toggleScan(username: string) {
 }
 
 async function adoptPicked() {
-  if (!scanPicked.value.length) return
-  adopting.value = true
+  if (!scanPicked.value.length || adoptRunning.value) return
+  adoptStarting.value = true
   try {
-    const res = await api.post<{ items: AdoptResult[] }>('/tenants/adopt', {
+    const res = await api.post<{ job: Job }>('/tenants/adopt', {
       usernames: scanPicked.value,
     })
-    const items = res.items || []
-    const failed = items.filter((r) => r.error)
-    const ok = items.length - failed.length
-    if (failed.length) {
-      toast(
-        `纳入完成：成功 ${ok} 个，失败 ${failed.length} 个（${failed[0].username}：${failed[0].error}）`,
-        'error',
-      )
-    } else {
-      toast(`已纳入 ${ok} 个已有实例`, 'success')
-    }
-    scanOpen.value = false
-    load(true)
+    adoptJob.value = res.job
+    pollAdoptJob()
   } catch (e) {
     toast(errorMessage(e, '纳入失败'), 'error')
   } finally {
-    adopting.value = false
+    adoptStarting.value = false
   }
+}
+
+function pollAdoptJob() {
+  window.clearInterval(adoptTimer)
+  adoptTimer = window.setInterval(async () => {
+    if (!adoptJob.value) return
+    try {
+      const res = await api.get<{ job: Job }>(`/jobs/${adoptJob.value.id}`)
+      adoptJob.value = res.job
+      if (adoptDone.value) {
+        window.clearInterval(adoptTimer)
+        const ok = res.job.done - res.job.failed
+        if (res.job.status === 'succeeded') {
+          toast(`已纳入 ${ok} 个已有实例`, 'success')
+        } else {
+          toast(`纳入结束：成功 ${ok} 个，失败 ${res.job.failed} 个`, 'error')
+        }
+        load(true)
+      }
+    } catch {
+      window.clearInterval(adoptTimer)
+    }
+  }, 800)
+}
+
+const adoptProgress = computed(() => {
+  if (!adoptJob.value || !adoptJob.value.total) return 0
+  return Math.round((adoptJob.value.done / adoptJob.value.total) * 100)
+})
+const adoptDone = computed(
+  () => !!adoptJob.value && ['succeeded', 'failed', 'partial'].includes(adoptJob.value.status),
+)
+const adoptRunning = computed(() => !!adoptJob.value && !adoptDone.value)
+const adoptSummary = computed(() => {
+  if (!adoptJob.value) return ''
+  if (!adoptDone.value) return '纳入中'
+  if (adoptJob.value.status === 'succeeded') return '已完成'
+  if (adoptJob.value.status === 'partial') return '部分失败'
+  return '失败'
+})
+
+function jobItemLabel(status: string) {
+  switch (status) {
+    case 'pending':
+      return '排队中'
+    case 'running':
+      return '处理中'
+    case 'succeeded':
+      return '已纳入'
+    case 'failed':
+      return '失败'
+    default:
+      return status
+  }
+}
+
+function jobItemBadge(status: string) {
+  if (status === 'succeeded') return 'badge-ok'
+  if (status === 'failed') return 'badge-failed'
+  return 'badge-neutral'
 }
 
 function scanStatus(c: AdoptCandidate) {
@@ -253,71 +404,106 @@ function scanStatus(c: AdoptCandidate) {
           <button class="btn btn-sm" type="button" @click="bulk('start')"><Play :size="13" /> 启动</button>
           <button class="btn btn-sm" type="button" @click="bulk('stop')"><Square :size="13" /> 停止</button>
           <button class="btn btn-sm" type="button" @click="bulk('restart')"><RotateCw :size="13" /> 重启</button>
+          <button class="btn btn-sm" type="button" @click="openQuota"><Gauge :size="13" /> 改配额</button>
+          <button class="btn btn-sm" type="button" @click="openReset"><KeyRound :size="13" /> 重置密码</button>
         </div>
         <button class="btn btn-ghost btn-sm" type="button" @click="selected = []">取消选择</button>
       </div>
     </div>
 
-    <div v-if="items.length" class="table-wrap" style="margin-top: 12px">
-      <table class="table">
-        <thead>
-          <tr>
-            <th style="width: 36px"><input class="checkbox" type="checkbox" :checked="allChecked" @change="toggleAll" /></th>
-            <th>租户</th>
-            <th>访问地址</th>
-            <th>状态</th>
-            <th>版本</th>
-            <th>CPU</th>
-            <th>内存</th>
-            <th>磁盘</th>
-            <th>最近活跃</th>
-            <th style="text-align: right">操作</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="t in items" :key="t.id">
-            <td><input class="checkbox" type="checkbox" :checked="selected.includes(t.id)" @change="toggle(t.id)" /></td>
-            <td>
-              <router-link :to="`/tenants/${t.id}`" class="mono">{{ t.username }}</router-link>
-              <div class="small muted-2">{{ t.display_name || '—' }}</div>
-            </td>
-            <td><a class="mono small" :href="t.address" target="_blank" rel="noreferrer">{{ t.address }}</a></td>
-            <td><StatusBadge :status="t.status" /></td>
-            <td class="mono small">{{ t.version || '—' }}</td>
-            <td class="num small">{{ formatPercent(t.metrics?.cpu_percent || 0) }}</td>
-            <td class="num small">{{ formatBytes(t.metrics?.memory_bytes || 0) }}</td>
-            <td class="num small">{{ formatBytes(t.disk_bytes || 0) }}</td>
-            <td class="small" :title="'最近一次对话：' + formatTime(t.last_active_at)">{{ formatAgo(t.last_active_at) }}</td>
-            <td>
-              <div class="actions">
-                <button
-                  v-if="t.status === 'running'"
-                  class="btn btn-ghost btn-sm btn-icon"
-                  type="button"
-                  title="停止"
-                  @click="act(t, 'stop')"
-                >
-                  <Square :size="14" />
-                </button>
-                <button
-                  v-else
-                  class="btn btn-ghost btn-sm btn-icon"
-                  type="button"
-                  title="启动"
-                  @click="act(t, 'start')"
-                >
-                  <Play :size="14" />
-                </button>
-                <button class="btn btn-ghost btn-sm btn-icon" type="button" title="重启" @click="act(t, 'restart')">
-                  <RotateCw :size="14" />
-                </button>
-                <router-link class="btn btn-sm" :to="`/tenants/${t.id}`">详情</router-link>
-              </div>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
+    <Modal v-if="quotaOpen" title="批量修改资源上限" @close="quotaOpen = false">
+      <p class="muted small" style="margin-top: 0">
+        将给选中的 {{ selected.length }} 个实例设置同一套上限。运行中的实例会重启一次，状态和结果可以在任务进度里看。
+      </p>
+      <div class="form-grid">
+        <div class="field"><label>CPU 上限</label><input v-model="quotaDraft.cpu_quota" class="input mono" placeholder="200%" /></div>
+        <div class="field"><label>内存上限</label><input v-model="quotaDraft.memory_max" class="input mono" placeholder="4G" /></div>
+        <div class="field"><label>进程数上限</label><input v-model.number="quotaDraft.tasks_max" class="input mono" type="number" min="1" /></div>
+        <div class="field">
+          <label>磁盘上限（GB，0 = 不限制）</label>
+          <input v-model.number="quotaDraft.disk_quota_gb" class="input mono" type="number" min="0" />
+        </div>
+      </div>
+      <div v-if="quotaError" class="small" style="color: var(--red); margin-top: 8px">{{ quotaError }}</div>
+      <template #footer>
+        <button class="btn" type="button" @click="quotaOpen = false">取消</button>
+        <button class="btn btn-primary" type="button" :disabled="quotaBusy" @click="submitQuota">
+          {{ quotaBusy ? '提交中…' : '开始修改' }}
+        </button>
+      </template>
+    </Modal>
+
+    <Modal v-if="resetOpen" title="批量重置密码" @close="resetOpen = false">
+      <p class="muted small" style="margin-top: 0">
+        将给选中的 {{ selected.length }} 个账号各生成一个新密码，旧密码立即失效。开启 SSH 的账号，网页和 SSH 都用新密码。
+      </p>
+      <p class="small muted-2">
+        密码只存在于这次任务的下载文件里，平台不会保存。任务结束后请立刻下载，关闭或过期后就找不回来了。
+      </p>
+      <div v-if="resetDone" class="card" style="padding: 12px; margin-top: 10px">
+        <div class="row-between">
+          <span class="small">
+            进度 {{ resetDone.done }} / {{ resetDone.total }}
+            <span v-if="resetDone.failed"> · 失败 {{ resetDone.failed }}</span>
+          </span>
+          <button
+            class="btn btn-sm btn-primary"
+            type="button"
+            :disabled="!['succeeded', 'partial'].includes(resetDone.status)"
+            @click="downloadPasswords(resetDone)"
+          >
+            <Download :size="13" /> 下载新密码
+          </button>
+        </div>
+      </div>
+      <div v-if="resetError" class="small" style="color: var(--red); margin-top: 8px">{{ resetError }}</div>
+      <template #footer>
+        <button class="btn" type="button" @click="resetOpen = false">{{ resetDone ? '完成' : '取消' }}</button>
+        <button
+          v-if="!resetDone"
+          class="btn btn-danger"
+          type="button"
+          :disabled="resetBusy"
+          @click="submitReset"
+        >
+          {{ resetBusy ? '提交中…' : '确认重置' }}
+        </button>
+      </template>
+    </Modal>
+
+    <TenantTable
+      v-if="items.length"
+      :items="items"
+      admin
+      :selected="selected"
+      style="margin-top: 12px"
+      @toggle="toggle"
+      @toggle-all="toggleAll"
+    >
+      <template #actions="{ row: t }">
+        <button
+          v-if="t.status === 'running'"
+          class="btn btn-ghost btn-sm btn-icon"
+          type="button"
+          title="停止"
+          @click="act(t as Tenant, 'stop')"
+        >
+          <Square :size="14" />
+        </button>
+        <button
+          v-else
+          class="btn btn-ghost btn-sm btn-icon"
+          type="button"
+          title="启动"
+          @click="act(t as Tenant, 'start')"
+        >
+          <Play :size="14" />
+        </button>
+        <button class="btn btn-ghost btn-sm btn-icon" type="button" title="重启" @click="act(t as Tenant, 'restart')">
+          <RotateCw :size="14" />
+        </button>
+      </template>
+    </TenantTable>
 
     <div v-else-if="!loading" style="margin-top: 12px">
       <EmptyState title="没有找到租户" hint="换个搜索词，或者创建第一个实例。">
@@ -337,12 +523,47 @@ function scanStatus(c: AdoptCandidate) {
       </div>
     </div>
 
-    <Modal v-if="scanOpen" title="扫描机器上已有的实例" wide @close="scanOpen = false">
+    <Modal v-if="scanOpen" title="扫描机器上已有的实例" wide @close="closeScan">
       <p class="muted small" style="margin-top: 0">
-        平台会检查本机每个用户的家目录，发现 Clawbench 数据目录的账号就列出来。勾选后会把它的服务改成平台统一管理，会重启一次、中断几秒；员工原来的密码不变。
+        平台会检查本机每个用户的家目录，发现 Clawbench 数据目录的账号就列出来。勾选后会把它的服务改成平台统一管理，会重启一次、中断几秒；员工原来的密码不变。多个账号会并行处理（最多 3 个），下面能看到每一个的进度。
       </p>
       <div v-if="scanning" class="muted" style="padding: 20px 0">正在扫描…</div>
       <div v-else-if="scanError" class="muted" style="padding: 20px 0">{{ scanError }}</div>
+      <div v-else-if="adoptJob">
+        <div class="row-between" style="margin-bottom: 10px; flex-wrap: wrap; gap: 8px">
+          <span class="small muted-2">
+            {{ adoptJob.done }} / {{ adoptJob.total }}
+            <span v-if="adoptJob.failed" style="color: var(--red)"> · 失败 {{ adoptJob.failed }}</span>
+          </span>
+          <span
+            class="badge"
+            :class="adoptDone ? (adoptJob.status === 'succeeded' ? 'badge-ok' : adoptJob.status === 'partial' ? 'badge-neutral' : 'badge-failed') : 'badge-neutral'"
+          >
+            {{ adoptSummary }}
+          </span>
+        </div>
+        <div class="progress" style="margin-bottom: 14px"><span :style="{ width: adoptProgress + '%' }" /></div>
+        <div class="table-wrap" style="max-height: 46vh; overflow: auto">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>用户</th>
+                <th>状态</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="item in adoptJob.items || []" :key="item.id">
+                <td class="mono small">{{ item.name }}</td>
+                <td>
+                  <span class="badge" :class="jobItemBadge(item.status)">{{ jobItemLabel(item.status) }}</span>
+                </td>
+                <td class="small" :style="item.error ? 'color: var(--red)' : ''">{{ item.error || '—' }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
       <div v-else class="table-wrap" style="max-height: 52vh; overflow: auto">
         <table class="table">
           <thead>
@@ -389,11 +610,23 @@ function scanStatus(c: AdoptCandidate) {
         </table>
       </div>
       <template #footer>
-        <button class="btn" type="button" @click="scanOpen = false">取消</button>
-        <button class="btn" type="button" :disabled="scanning || adopting" @click="openScan">重新扫描</button>
-        <button class="btn btn-primary" type="button" :disabled="adopting || !scanPicked.length" @click="adoptPicked">
-          {{ adopting ? '纳入中…' : `纳入所选（${scanPicked.length}）` }}
+        <button v-if="!adoptJob" class="btn" type="button" @click="closeScan">取消</button>
+        <button v-if="!adoptJob" class="btn" type="button" :disabled="scanning || adoptStarting" @click="openScan">
+          重新扫描
         </button>
+        <button
+          v-if="!adoptJob"
+          class="btn btn-primary"
+          type="button"
+          :disabled="adoptStarting || !scanPicked.length"
+          @click="adoptPicked"
+        >
+          {{ adoptStarting ? '开始中…' : `纳入所选（${scanPicked.length}）` }}
+        </button>
+        <button v-if="adoptRunning" class="btn btn-primary" type="button" disabled>
+          纳入中… {{ adoptJob?.done }}/{{ adoptJob?.total }}
+        </button>
+        <button v-if="adoptDone" class="btn btn-primary" type="button" @click="closeScan">关闭</button>
       </template>
     </Modal>
   </div>

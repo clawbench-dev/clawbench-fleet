@@ -3,6 +3,7 @@ package sysops
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net"
@@ -24,9 +25,11 @@ type Fake struct {
 	BaseDir    string
 	InstallDir string
 
-	mu    sync.Mutex
-	users map[string]int
-	units map[string]*fakeUnit
+	mu        sync.Mutex
+	users     map[string]int
+	units     map[string]*fakeUnit
+	shells    map[string]string
+	passwords map[string]string
 }
 
 type fakeUnit struct {
@@ -40,9 +43,10 @@ type fakeUnit struct {
 }
 
 var (
-	fakePortRe   = regexp.MustCompile(`--port\s+(\d+)`)
-	fakeUserRe   = regexp.MustCompile(`(?m)^User=(\S+)`)
-	fakeClosedRe = regexp.MustCompile(`(?m)^#\s*clawbench-fake: closed\s*$`)
+	fakePortRe    = regexp.MustCompile(`--port\s+(\d+)`)
+	fakeUserRe    = regexp.MustCompile(`(?m)^User=(\S+)`)
+	fakeClosedRe  = regexp.MustCompile(`(?m)^#\s*clawbench-fake: closed\s*$`)
+	fakeVersionRe = regexp.MustCompile(`echo\s+([^\s;]+)`)
 )
 
 func NewFake(baseDir, installDir string) *Fake {
@@ -51,6 +55,8 @@ func NewFake(baseDir, installDir string) *Fake {
 		InstallDir: installDir,
 		users:      map[string]int{},
 		units:      map[string]*fakeUnit{},
+		shells:     map[string]string{},
+		passwords:  map[string]string{},
 	}
 	_ = os.MkdirAll(filepath.Join(baseDir, "homes"), 0o755)
 	_ = os.MkdirAll(filepath.Join(baseDir, "units"), 0o755)
@@ -107,6 +113,7 @@ func (f *Fake) CreateUser(ctx context.Context, username string, uid int) error {
 	}
 	f.mu.Lock()
 	f.users[username] = uid
+	f.shells[username] = "/usr/sbin/nologin"
 	f.mu.Unlock()
 	return nil
 }
@@ -114,8 +121,63 @@ func (f *Fake) CreateUser(ctx context.Context, username string, uid int) error {
 func (f *Fake) DeleteUser(ctx context.Context, username string) error {
 	f.mu.Lock()
 	delete(f.users, username)
+	delete(f.shells, username)
+	delete(f.passwords, username)
 	f.mu.Unlock()
 	return nil
+}
+
+func (f *Fake) SetPassword(ctx context.Context, username, password string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.users[username]; !ok {
+		return fmt.Errorf("user %s not found", username)
+	}
+	f.passwords[username] = password
+	return nil
+}
+
+func (f *Fake) SetShell(ctx context.Context, username, shell string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.users[username]; !ok {
+		return fmt.Errorf("user %s not found", username)
+	}
+	f.shells[username] = shell
+	return nil
+}
+
+func (f *Fake) LockPassword(ctx context.Context, username string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.users[username]; !ok {
+		return fmt.Errorf("user %s not found", username)
+	}
+	delete(f.passwords, username)
+	return nil
+}
+
+// KillUserProcesses stops the simulated instance owned by the account, which
+// is the only process the fake knows about.
+func (f *Fake) KillUserProcesses(ctx context.Context, username string) error {
+	f.mu.Lock()
+	var units []string
+	for name, u := range f.units {
+		if u.username == username && u.server != nil {
+			units = append(units, name)
+		}
+	}
+	f.mu.Unlock()
+	for _, name := range units {
+		_ = f.Stop(ctx, name)
+	}
+	return nil
+}
+
+// SSHStatus reports a healthy sshd so the dev UI shows the same green state
+// as a correctly configured production server.
+func (f *Fake) SSHStatus(ctx context.Context) (SSHStatus, error) {
+	return SSHStatus{Installed: true, Running: true, PasswordAuth: true, Port: 22}, nil
 }
 
 func (f *Fake) LookupIDs(ctx context.Context, username string) (int, int, error) {
@@ -474,4 +536,66 @@ func (f *Fake) NpmInstall(ctx context.Context, prefix, pkg, version, registry st
 
 func (f *Fake) NpmRegistry(ctx context.Context) (string, error) {
 	return "https://registry.npmjs.org/", nil
+}
+
+// CheckupVersion reads the version from the script the fake installs, so an
+// uploaded dev binary reports the same version the real one would.
+func (f *Fake) CheckupVersion(ctx context.Context, path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	if m := fakeVersionRe.FindStringSubmatch(string(data)); len(m) == 2 {
+		return m[1], nil
+	}
+	return "", errors.New("程序没有输出版本号")
+}
+
+// ReplaceSelf overwrites the dev copy of the platform binary. --dev runs from
+// the build directory, so it uses the same backup-and-swap as production but
+// never restarts anything: the dev server keeps running whatever was started.
+func (f *Fake) ReplaceSelf(src, dst string) error {
+	if err := copySelfFile(src, dst+".bak"); err != nil {
+		return err
+	}
+	return copySelfFile(src, dst)
+}
+
+// RestartSelf is a no-op in dev: there is no unit to restart, and killing the
+// dev server would end the session the operator is working in.
+func (f *Fake) RestartSelf(ctx context.Context) error { return nil }
+
+// PortHolders reports a simulated holder for ports a fake unit listens on. The
+// dev server itself is never a systemd unit, so nothing is ever marked Self.
+func (f *Fake) PortHolders(ctx context.Context, port int, username string) ([]PortHolder, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if username != "" {
+		if _, ok := f.users[username]; !ok {
+			return nil, fmt.Errorf("账号 %s 不存在", username)
+		}
+	}
+	for _, u := range f.units {
+		if u.port == port && u.server != nil {
+			return []PortHolder{{PID: os.Getpid()}}, nil
+		}
+	}
+	return nil, nil
+}
+
+// KillProcess is never reached in dev: the only process a fake could report is
+// the dev server itself, and ending it would close the session in progress.
+func (f *Fake) KillProcess(ctx context.Context, pid int) error {
+	if pid == os.Getpid() {
+		return errors.New("不会停掉正在运行这次操作的进程")
+	}
+	return nil
+}
+
+func copySelfFile(src, dst string) error {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(dst, data, 0o755) //nolint:gosec // the platform binary must be executable
 }

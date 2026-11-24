@@ -30,7 +30,9 @@ export interface Tenant {
   data_dir: string
   unit_name: string
   notes: string
+  ssh_enabled: boolean
   disk_bytes: number
+  disk_quota_gb: number
   disk_checked_at: string
   last_health_at: string
   last_health_ok: boolean
@@ -43,6 +45,14 @@ export interface Tenant {
   address: string
   metrics: Metrics
   protected: boolean
+}
+
+export interface MetricSample {
+  at: string
+  cpu_percent: number
+  memory_bytes: number
+  pids: number
+  disk_bytes: number
 }
 
 export interface AdoptCandidate {
@@ -68,13 +78,6 @@ export interface AdoptCandidate {
   status: string
   blocked: string
   warnings: string[]
-}
-
-export interface AdoptResult {
-  username: string
-  tenant_id?: number
-  status: string
-  error: string
 }
 
 export interface HostStats {
@@ -161,6 +164,8 @@ export interface Settings {
   default_memory_max: string
   default_tasks_max: number
   disk_warn_gb: number
+  default_disk_quota_gb: number
+  metrics_retention_days: number
   backup_enabled: boolean
   backup_hour: number
   backup_retention_days: number
@@ -171,6 +176,34 @@ export interface Settings {
   guest_enabled: boolean
   guest_notice: string
   guest_help: string
+  ssh_enabled: boolean
+  tls_enabled: boolean
+  tls_cert_dir: string
+}
+
+export interface ConfigEntry {
+  key: string
+  value: string
+}
+
+export interface CertificateInfo {
+  enabled: boolean
+  dir: string
+  exists: boolean
+  self_signed: boolean
+  subject: string
+  dns_names: string[]
+  ips: string[]
+  not_before: string
+  not_after: string
+}
+
+export interface SSHStatus {
+  installed: boolean
+  running: boolean
+  password_auth: boolean
+  port: number
+  problem: string
 }
 
 export interface Overview {
@@ -207,6 +240,11 @@ export interface GuestInstance {
   port: number
   address: string
   status: string
+  version: string
+  metrics: Metrics
+  disk_bytes: number
+  disk_checked_at: string
+  last_active_at: string
   disk_warn: boolean
 }
 
@@ -215,6 +253,9 @@ export interface GuestPage {
   notice: string
   help: string
   items: GuestInstance[]
+  total: number
+  page: number
+  page_size: number
 }
 
 export interface TrashItem extends Tenant {

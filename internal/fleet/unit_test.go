@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -433,6 +434,50 @@ func TestGuestPageAndReports(t *testing.T) {
 	if reportErr := svc.SubmitGuestReport(999, "x", ""); reportErr == nil {
 		t.Fatal("unknown tenant must be rejected")
 	}
+	// The public listing is the admin table's data minus machine internals, so
+	// it carries version/metrics/disk for everyone but still no paths or UIDs.
+	bob := createRunning(t, svc, "bob")
+	page, err = svc.GuestPageFor("", GuestQuery{Query: "bo"})
+	if err != nil || page.Total != 1 || len(page.Items) != 1 || page.Items[0].Username != "bob" {
+		t.Fatalf("filtered guest page = %+v %v", page, err)
+	}
+	// Notes are the admin's bookkeeping: searching them from the public page
+	// would let anyone probe what was written about a colleague.
+	notes := "待离职"
+	if _, err := svc.UpdateTenant(context.Background(), bob.ID, UpdateTenantInput{Notes: &notes}, AuditContext{Actor: "ops"}); err != nil {
+		t.Fatal(err)
+	}
+	page, err = svc.GuestPageFor("", GuestQuery{Query: "待离职"})
+	if err != nil || page.Total != 0 || len(page.Items) != 0 {
+		t.Fatalf("notes must not be searchable: %+v %v", page, err)
+	}
+	// A half-deleted instance is filtered in SQL, so it neither shows up nor
+	// eats a slot on the page.
+	if err := svc.Store.SetTenantStatus(bob.ID, domain.StatusDeleting, ""); err != nil {
+		t.Fatal(err)
+	}
+	page, err = svc.GuestPageFor("", GuestQuery{Page: 1, PageSize: 1})
+	if err != nil || page.Total != 1 || len(page.Items) != 1 || page.Items[0].Username != "alice" {
+		t.Fatalf("deleting tenant leaked into the page: %+v %v", page, err)
+	}
+	// Internal statuses are not filter values the public page accepts.
+	page, err = svc.GuestPageFor("", GuestQuery{Status: domain.StatusDeleting})
+	if err != nil || page.Total != 1 {
+		t.Fatalf("internal status filter must be ignored: %+v %v", page, err)
+	}
+	page, err = svc.GuestPageFor("", GuestQuery{Page: 1, PageSize: 1})
+	if err != nil || page.Total != 1 || len(page.Items) != 1 {
+		t.Fatalf("paged guest page = %+v %v", page, err)
+	}
+	raw, err := json.Marshal(page.Items[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, leak := range []string{"home_dir", "data_dir", "uid", "gid", "notes", "unit_name", "last_error"} {
+		if strings.Contains(string(raw), leak) {
+			t.Fatalf("guest page leaked %q: %s", leak, raw)
+		}
+	}
 	reports, err := svc.ListGuestReports(true, 10)
 	if err != nil || len(reports) != 1 {
 		t.Fatalf("reports = %+v %v", reports, err)
@@ -563,8 +608,8 @@ func TestFailedHealthRollsBackUpdate(t *testing.T) {
 	if err := svc.Sys.WriteUnit(ctx, alice.UnitName, unit); err != nil {
 		t.Fatal(err)
 	}
-	name := "Alice"
-	if _, err := svc.UpdateTenant(ctx, alice.ID, UpdateTenantInput{DisplayName: &name}, AuditContext{}); err == nil {
+	quota := "150%"
+	if _, err := svc.UpdateTenant(ctx, alice.ID, UpdateTenantInput{CPUQuota: &quota}, AuditContext{}); err == nil {
 		// The fake restart may still succeed if Start returns early; in that
 		// case the tenant is still consistent.
 		fresh, _ := svc.GetTenant(alice.ID)

@@ -122,3 +122,49 @@ func TestSettingsReportVersion(t *testing.T) {
 		t.Fatalf("settings payload = %+v", got)
 	}
 }
+
+// TestSelfUpgradeEndpoints covers the platform-upgrade entry points. --dev has
+// no installed binary to swap, so the page must be told it is unsupported and
+// the upload must fail loudly instead of pretending the platform changed.
+func TestSelfUpgradeEndpoints(t *testing.T) {
+	c, _ := newTestClient(t)
+	var info struct {
+		Version   string `json:"version"`
+		Binary    string `json:"binary"`
+		Supported bool   `json:"supported"`
+	}
+	if status := c.json(http.MethodGet, "/api/upgrades/self", nil, &info); status != http.StatusOK {
+		t.Fatalf("info = %d", status)
+	}
+	if info.Supported || info.Version == "" || info.Binary == "" {
+		t.Fatalf("info = %+v", info)
+	}
+	status, body := c.upload("/api/upgrades/self", "file", "clawbench-fleet", []byte("#!/bin/sh\nexit 0\n"))
+	if status != http.StatusBadRequest {
+		t.Fatalf("dev upload = %d %s", status, body)
+	}
+	// Handing the platform to systemd means the same thing in --dev: there is
+	// no unit to write, so the button has to say so rather than half-do it.
+	if status, body := c.request(http.MethodPost, "/api/upgrades/self/adopt", nil); status != http.StatusBadRequest {
+		t.Fatalf("dev adopt = %d %s", status, body)
+	}
+}
+
+// TestSelfUpgradeRejectsIncompleteUploads covers the two ways the upload form
+// can arrive malformed. Both must come back as a 400 the page can show, not a
+// 500 or a hung request.
+func TestSelfUpgradeRejectsIncompleteUploads(t *testing.T) {
+	c, _ := newTestClient(t)
+
+	// A multipart body with the wrong field name is what a stale frontend or a
+	// hand-rolled curl sends: the form parses, but there is no "file" part.
+	if status, body := c.upload("/api/upgrades/self", "upload", "clawbench-fleet", []byte("x")); status != http.StatusBadRequest {
+		t.Fatalf("wrong field name = %d %s", status, body)
+	}
+
+	// A body that is not multipart at all fails while parsing the form.
+	status, body := c.request(http.MethodPost, "/api/upgrades/self", map[string]string{"file": "not-a-file"})
+	if status != http.StatusBadRequest {
+		t.Fatalf("non-multipart upload = %d %s", status, body)
+	}
+}

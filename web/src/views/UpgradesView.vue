@@ -26,7 +26,16 @@ const npmWarning = ref('')
 const npmChoice = ref('')
 const npmLoading = ref(false)
 const installing = ref(false)
+const selfInfo = ref<{ version: string; binary: string; supported: boolean; mode: string } | null>(null)
+const selfFile = ref<File | null>(null)
+const selfUploading = ref(false)
+const selfWaiting = ref(false)
+const selfWarning = ref('')
+const confirmSelf = ref(false)
+const adopting = ref(false)
+const confirmAdopt = ref(false)
 let timer = 0
+let selfTimer = 0
 
 async function load() {
   loading.value = true
@@ -48,6 +57,103 @@ async function load() {
     loading.value = false
   }
   loadNpm()
+  loadSelf()
+}
+
+async function loadSelf() {
+  try {
+    selfInfo.value = await api.get<{ version: string; binary: string; supported: boolean; mode: string }>('/upgrades/self')
+  } catch (e) {
+    selfWarning.value = errorMessage(e, '读取平台版本失败')
+  }
+}
+
+function chooseSelfFile(event: Event) {
+  const f = (event.target as HTMLInputElement).files?.[0]
+  if (f) selfFile.value = f
+}
+
+// waitForSelf 在平台重启期间反复问 /api/health，直到新进程应答为止。
+// 上传请求本身会在进程退出时断开，所以断开之后的完成状态只能靠这里确认。
+function waitForSelf(expected: string, action: 'upgrade' | 'adopt' = 'upgrade') {
+  selfWaiting.value = true
+  const deadline = Date.now() + 3 * 60 * 1000
+  window.clearInterval(selfTimer)
+  selfTimer = window.setInterval(async () => {
+    try {
+      const res = await fetch('/api/health', { credentials: 'include' })
+      const data = (await res.json()) as { version?: string }
+      if (res.ok) {
+        window.clearInterval(selfTimer)
+        selfWaiting.value = false
+        const got = data.version || ''
+        if (got.replace(/^v/, '') === expected.replace(/^v/, '')) {
+          toast(action === 'adopt'
+            ? `平台已由系统托管并重新上线（版本 ${got}）`
+            : `平台已升级到 ${got}，正在刷新页面`, 'success')
+          window.setTimeout(() => window.location.reload(), 1200)
+        } else {
+          // 版本对不上，说明系统拉起来的可能是另一份程序。自动刷新会把这条
+          // 提示冲掉，所以留在页面上把话说清楚。
+          selfWarning.value = `平台已重新上线，但报告的版本是 ${got || '未知'}，期望 ${expected}。请核对 systemd 的 ExecStart 是否指向这次运行的程序。`
+          toast(selfWarning.value, 'error')
+        }
+      }
+    } catch {
+      // 服务还没起来，继续等。
+      if (Date.now() > deadline) {
+        window.clearInterval(selfTimer)
+        selfWaiting.value = false
+        toast('平台重启后一直没响应，请到服务器上检查 systemctl status clawbench-fleet', 'error')
+      }
+    }
+  }, 2000)
+}
+
+async function uploadSelf() {
+  if (!selfFile.value) return
+  confirmSelf.value = false
+  selfUploading.value = true
+  selfWarning.value = ''
+  try {
+    const res = await api.upload<{
+      result: { uploaded_version: string; backup_path: string; restarting: boolean }
+      restarting: boolean
+      warning?: string
+    }>('/upgrades/self', selfFile.value)
+    if (res.warning) selfWarning.value = res.warning
+    if (res.result.backup_path) {
+      toast(`旧程序已备份到 ${res.result.backup_path}`, 'success')
+    }
+    selfFile.value = null
+    selfUploading.value = false
+    waitForSelf(res.result.uploaded_version)
+  } catch (e) {
+    selfUploading.value = false
+    toast(errorMessage(e, '上传失败，平台没有改动'), 'error')
+  }
+}
+
+async function adoptSelf() {
+  confirmAdopt.value = false
+  adopting.value = true
+  selfWarning.value = ''
+  try {
+    const res = await api.post<{
+      result: { service_path: string; config_path: string; stopped: number; restarting: boolean }
+      restarting: boolean
+      warning?: string
+    }>('/upgrades/self/adopt')
+    if (res.warning) selfWarning.value = res.warning
+    toast(res.result.stopped > 0
+      ? `服务定义已写入 ${res.result.service_path}，停掉了 ${res.result.stopped} 个手工启动的进程`
+      : `服务定义已写入 ${res.result.service_path}`, 'success')
+    adopting.value = false
+    waitForSelf(selfInfo.value?.version || '', 'adopt')
+  } catch (e) {
+    adopting.value = false
+    toast(errorMessage(e, '交给 systemd 托管失败'), 'error')
+  }
 }
 
 async function loadNpm() {
@@ -93,7 +199,10 @@ async function installNpm() {
 }
 
 onMounted(load)
-onBeforeUnmount(() => window.clearInterval(timer))
+onBeforeUnmount(() => {
+  window.clearInterval(timer)
+  window.clearInterval(selfTimer)
+})
 
 function chooseFile(event: Event) {
   const f = (event.target as HTMLInputElement).files?.[0]
@@ -330,6 +439,67 @@ function statusText(v: Version): string {
       </div>
     </div>
 
+    <div class="card" style="margin-top: 16px">
+      <div class="card-header">
+        <div>
+          <div class="card-title">升级平台自身</div>
+          <div class="card-sub">
+            上传一个 clawbench-fleet 二进制，替换本平台程序并自动重启服务；只影响管理后台，不动任何实例
+          </div>
+        </div>
+        <ArrowUpCircle :size="20" color="var(--accent)" />
+      </div>
+      <div class="small muted-2" style="margin-bottom: 10px">
+        当前平台版本 <span class="mono">{{ selfInfo?.version || '—' }}</span>
+        <span v-if="selfInfo?.binary" class="mono" style="word-break: break-all"> · {{ selfInfo.binary }}</span>
+      </div>
+      <div v-if="selfInfo && !selfInfo.supported" class="row small" style="color: var(--amber); align-items: flex-start; margin-bottom: 10px">
+        <AlertTriangle :size="15" style="flex: 0 0 auto; margin-top: 1px" />
+        <span>当前是开发模式，不提供平台自升级。请在正式部署（systemd）的服务器上使用。</span>
+      </div>
+      <div v-if="selfWarning" class="row small" style="color: var(--amber); align-items: flex-start; margin-bottom: 10px">
+        <AlertTriangle :size="15" style="flex: 0 0 auto; margin-top: 1px" />
+        <span>{{ selfWarning }}</span>
+      </div>
+      <div v-if="selfWaiting" class="row small" style="color: var(--accent); align-items: center">
+        <span>新版本已写入，正在等待平台重启…页面会在平台回来后自动刷新。</span>
+      </div>
+      <template v-else>
+        <label class="upload-box">
+          <input type="file" style="display: none" :disabled="!selfInfo?.supported" @change="chooseSelfFile" />
+          <UploadCloud :size="22" />
+          <div class="small" style="margin-top: 6px">{{ selfFile ? selfFile.name : '选择 clawbench-fleet 二进制文件' }}</div>
+          <div class="small muted-2">{{ selfFile ? formatBytes(selfFile.size) : '最大 600 MB' }}</div>
+        </label>
+        <div class="form-actions" style="justify-content: flex-start">
+          <button
+            class="btn"
+            type="button"
+            :disabled="!selfFile || selfUploading || !selfInfo?.supported"
+            @click="confirmSelf = true"
+          >
+            {{ selfUploading ? '上传并校验中…' : '上传并重启平台' }}
+          </button>
+        </div>
+        <div class="row small muted-2" style="align-items: flex-start; margin-top: 12px">
+          <span>
+            如果平台是用 nohup 之类手工挂起来的，升级后不会有人把它重新拉起来，页面会一直打不开。点下面的按钮把当前程序交给系统托管：
+            写服务定义、设成开机自启，然后停掉手工启动的进程并重新启动。
+          </span>
+        </div>
+        <div class="form-actions" style="justify-content: flex-start; margin-top: 8px">
+          <button
+            class="btn"
+            type="button"
+            :disabled="adopting || !selfInfo?.supported"
+            @click="confirmAdopt = true"
+          >
+            {{ adopting ? '正在托管中…' : '交给系统托管并重启' }}
+          </button>
+        </div>
+      </template>
+    </div>
+
     <div v-if="activeJob" class="card" style="margin-top: 16px">
       <div class="card-header">
         <div>
@@ -376,6 +546,26 @@ function statusText(v: Version): string {
       danger
       @cancel="pendingApply = null"
       @confirm="doApply"
+    />
+
+    <ConfirmDialog
+      :open="confirmSelf"
+      title="升级平台自身"
+      message="会用上传的文件替换正在运行的管理后台程序，然后重启 clawbench-fleet 服务。\n\n期间后台页面会断开几十秒，员工实例完全不受影响。旧程序会备份在同目录的 .bak 文件里，出问题可以手工换回去。"
+      confirm-text="确认替换并重启"
+      danger
+      @cancel="confirmSelf = false"
+      @confirm="uploadSelf"
+    />
+
+    <ConfirmDialog
+      :open="confirmAdopt"
+      title="交给系统托管"
+      message="会写一份 clawbench-fleet.service 服务定义（程序路径取当前正在运行的这个程序，配置文件沿用启动时的 --config），设成开机自启，然后停掉手工启动的进程并由系统重新启动平台。\n\n期间后台页面会断开几十秒，员工实例完全不受影响。只停掉占用本平台端口的那个进程，不会碰其他程序。"
+      confirm-text="确认托管并重启"
+      danger
+      @cancel="confirmAdopt = false"
+      @confirm="adoptSelf"
     />
 
     <ConfirmDialog

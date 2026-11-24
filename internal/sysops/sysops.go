@@ -42,6 +42,25 @@ type Listener struct {
 	Cwd  string
 }
 
+// PortHolder is one process listening on a port. Self marks the process the
+// platform is running in right now, which is the one a hand-started deployment
+// leaves behind once the service takes over.
+type PortHolder struct {
+	PID  int
+	Self bool
+}
+
+// SSHStatus is what the platform can learn about the machine's SSH server
+// without changing its configuration. The platform only prepares tenant
+// accounts; whether sshd accepts them is the operator's policy.
+type SSHStatus struct {
+	Installed    bool   `json:"installed"`
+	Running      bool   `json:"running"`
+	PasswordAuth bool   `json:"password_auth"`
+	Port         int    `json:"port"`
+	Problem      string `json:"problem"`
+}
+
 // System is the narrow slice of the operating system the platform needs.
 // Everything here is implemented twice: once with real commands (Real) and
 // once in memory (Fake) so the whole product can be exercised without root.
@@ -54,6 +73,22 @@ type System interface {
 	LookupIDs(ctx context.Context, username string) (uid, gid int, err error)
 	UsedUIDs(ctx context.Context) (map[int]bool, error)
 	Chown(ctx context.Context, path string, uid, gid int) error
+
+	// SetPassword installs a password for username. It is used both for the
+	// Clawbench web login and, when SSH is enabled, for the Linux account.
+	SetPassword(ctx context.Context, username, password string) error
+	// SetShell changes the login shell, e.g. from nologin to bash.
+	SetShell(ctx context.Context, username, shell string) error
+	// LockPassword locks the account password so SSH cannot be used until a
+	// new password is set.
+	LockPassword(ctx context.Context, username string) error
+	// KillUserProcesses ends every process owned by username, including ones
+	// that escaped the systemd unit (an SSH shell, a background build). It is
+	// used when a tenant has to be shut down for exceeding its disk limit.
+	KillUserProcesses(ctx context.Context, username string) error
+	// SSHStatus reports whether this machine's sshd exists, runs, and accepts
+	// password logins. It never edits sshd_config.
+	SSHStatus(ctx context.Context) (SSHStatus, error)
 
 	// ListUsers enumerates local accounts. Adopting an existing instance
 	// starts from this list, not from the database.
@@ -91,6 +126,24 @@ type System interface {
 	// NpmInstall installs pkg@version into prefix, never into the global npm
 	// prefix, so several versions can be kept side by side.
 	NpmInstall(ctx context.Context, prefix, pkg, version, registry string) error
+
+	// CheckupVersion reports the version of the Clawbench binary at path.
+	CheckupVersion(ctx context.Context, path string) (string, error)
+	// ReplaceSelf swaps dst with src atomically enough that dst is either the
+	// old binary or the new one, never missing: the platform keeps running on
+	// the old file until the service manager starts it again.
+	ReplaceSelf(src, dst string) error
+	// RestartSelf restarts the platform's own systemd unit. It issues the
+	// command and returns without waiting for the unit to come back, because
+	// the restarted process is this one.
+	RestartSelf(ctx context.Context) error
+	// PortHolders lists the processes of username listening on port. It labels
+	// the platform's own process so the caller can tell "the service I am about
+	// to start is already mine" from "somebody else is sitting on the port".
+	PortHolders(ctx context.Context, port int, username string) ([]PortHolder, error)
+	// KillProcess ends one process by PID. The platform only uses it on a
+	// process it has just identified as its own, listening on its own port.
+	KillProcess(ctx context.Context, pid int) error
 }
 
 // NpmPlatformPackage maps a wrapper package such as "@scope/clawbench" to the
@@ -155,9 +208,19 @@ func run(ctx context.Context, name string, args ...string) (string, error) {
 }
 
 func runWithin(ctx context.Context, timeout time.Duration, name string, args ...string) (string, error) {
+	return runInput(ctx, timeout, "", name, args...)
+}
+
+// runInput is runWithin with something on stdin. chpasswd is the one command
+// that needs it: the password must not appear on the command line, where every
+// user on the machine could read it from ps.
+func runInput(ctx context.Context, timeout time.Duration, input, name string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, name, args...)
+	if input != "" {
+		cmd.Stdin = strings.NewReader(input)
+	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		var exit *exec.ExitError

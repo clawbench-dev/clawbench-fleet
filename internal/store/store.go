@@ -79,7 +79,9 @@ func (s *Store) migrate() error {
 			data_dir TEXT NOT NULL DEFAULT '',
 			unit_name TEXT NOT NULL DEFAULT '',
 			notes TEXT NOT NULL DEFAULT '',
+			ssh_enabled INTEGER NOT NULL DEFAULT 0,
 			disk_bytes INTEGER NOT NULL DEFAULT 0,
+			disk_quota_gb INTEGER NOT NULL DEFAULT 0,
 			disk_checked_at TEXT NOT NULL DEFAULT '',
 			last_health_at TEXT NOT NULL DEFAULT '',
 			last_health_ok INTEGER NOT NULL DEFAULT 0,
@@ -188,6 +190,17 @@ func (s *Store) migrate() error {
 			handled_by TEXT NOT NULL DEFAULT ''
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_guest_reports_created ON guest_reports(created_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS metric_samples (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			tenant_id INTEGER NOT NULL,
+			at TEXT NOT NULL,
+			cpu_percent REAL NOT NULL DEFAULT 0,
+			memory_bytes INTEGER NOT NULL DEFAULT 0,
+			pids INTEGER NOT NULL DEFAULT 0,
+			disk_bytes INTEGER NOT NULL DEFAULT 0
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_metric_samples_tenant ON metric_samples(tenant_id, at)`,
+		`CREATE INDEX IF NOT EXISTS idx_metric_samples_at ON metric_samples(at)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -197,6 +210,16 @@ func (s *Store) migrate() error {
 	// Databases created before last_active_at existed need the column added;
 	// SQLite has no "ADD COLUMN IF NOT EXISTS", so check first.
 	if err := s.addColumnIfMissing("tenants", "last_active_at", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("migrate: %w", err)
+	}
+	// Existing tenants keep SSH off until an operator turns it on: upgrading
+	// the platform must not silently open a login shell on old accounts.
+	if err := s.addColumnIfMissing("tenants", "ssh_enabled", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return fmt.Errorf("migrate: %w", err)
+	}
+	// Existing tenants start without a disk limit, the same way they started
+	// without SSH: an upgrade must not suddenly stop anyone's instance.
+	if err := s.addColumnIfMissing("tenants", "disk_quota_gb", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return fmt.Errorf("migrate: %w", err)
 	}
 	return nil
@@ -254,6 +277,41 @@ func (s *Store) SaveSettings(v domain.Settings) error {
 		return err
 	}
 	_, err = s.db.Exec(`INSERT INTO settings(key, value) VALUES('platform', ?)
+		ON CONFLICT(key) DO UPDATE SET value=excluded.value`, string(data))
+	return err
+}
+
+// LoadTenantConfig returns the unified config entries pushed to instances. It
+// lives in its own settings row because it is a list: keeping it inside the
+// scalar Settings value would make Settings non-comparable for no reason.
+func (s *Store) LoadTenantConfig() ([]domain.ConfigEntry, error) {
+	var raw string
+	err := s.db.QueryRow(`SELECT value FROM settings WHERE key='tenant_config'`).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return []domain.ConfigEntry{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	out := []domain.ConfigEntry{}
+	// Broken JSON is treated as "no unified config" rather than an error: the
+	// row is advisory data, and failing here would block the whole platform
+	// from starting over one bad value.
+	if uErr := json.Unmarshal([]byte(raw), &out); uErr != nil {
+		return []domain.ConfigEntry{}, nil //nolint:nilerr // see above
+	}
+	return out, nil
+}
+
+func (s *Store) SaveTenantConfig(entries []domain.ConfigEntry) error {
+	if entries == nil {
+		entries = []domain.ConfigEntry{}
+	}
+	data, err := json.Marshal(entries)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`INSERT INTO settings(key, value) VALUES('tenant_config', ?)
 		ON CONFLICT(key) DO UPDATE SET value=excluded.value`, string(data))
 	return err
 }

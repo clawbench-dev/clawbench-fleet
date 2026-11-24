@@ -119,7 +119,7 @@ func (s *Service) validateBinary(ctx context.Context, path, filename string) (st
 	// In dev mode we accept any executable and use the file name as the
 	// version, so the whole upgrade flow can be exercised without a real
 	// Clawbench binary.
-	if s.Sys.Mode() == "dev" {
+	if s.Sys.Mode() == modeDev {
 		base := filepath.Base(filename)
 		if versionRe.MatchString(base) {
 			return base, nil

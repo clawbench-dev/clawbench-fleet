@@ -10,8 +10,8 @@ import (
 )
 
 const tenantCols = `id, username, display_name, uid, gid, port, status, version,
-	cpu_quota, memory_max, tasks_max, home_dir, data_dir, unit_name, notes,
-	disk_bytes, disk_checked_at, last_health_at, last_health_ok, last_active_at, last_error,
+	cpu_quota, memory_max, tasks_max, home_dir, data_dir, unit_name, notes, ssh_enabled,
+	disk_bytes, disk_quota_gb, disk_checked_at, last_health_at, last_health_ok, last_active_at, last_error,
 	created_at, updated_at, deleted_at, trash_path`
 
 func scanTenant(row interface{ Scan(...any) error }) (*domain.Tenant, error) {
@@ -19,8 +19,8 @@ func scanTenant(row interface{ Scan(...any) error }) (*domain.Tenant, error) {
 	err := row.Scan(
 		&t.ID, &t.Username, &t.DisplayName, &t.UID, &t.GID, &t.Port, &t.Status, &t.Version,
 		&t.CPUQuota, &t.MemoryMax, &t.TasksMax, &t.HomeDir, &t.DataDir, &t.UnitName, &t.Notes,
-		&t.DiskBytes, &t.DiskChecked, &t.LastHealthAt, &t.LastHealthOK, &t.LastActiveAt, &t.LastError,
-		&t.CreatedAt, &t.UpdatedAt, &t.DeletedAt, &t.TrashPath,
+		&t.SSHEnabled, &t.DiskBytes, &t.DiskQuotaGB, &t.DiskChecked, &t.LastHealthAt, &t.LastHealthOK,
+		&t.LastActiveAt, &t.LastError, &t.CreatedAt, &t.UpdatedAt, &t.DeletedAt, &t.TrashPath,
 	)
 	if err != nil {
 		return nil, err
@@ -35,13 +35,13 @@ func (s *Store) CreateTenant(t *domain.Tenant) error {
 	t.UpdatedAt = now()
 	res, err := s.db.Exec(`INSERT INTO tenants
 		(username, display_name, uid, gid, port, status, version, cpu_quota, memory_max, tasks_max,
-		 home_dir, data_dir, unit_name, notes, disk_bytes, disk_checked_at, last_health_at,
-		 last_health_ok, last_active_at, last_error, created_at, updated_at, deleted_at, trash_path)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		 home_dir, data_dir, unit_name, notes, ssh_enabled, disk_bytes, disk_quota_gb, disk_checked_at,
+		 last_health_at, last_health_ok, last_active_at, last_error, created_at, updated_at, deleted_at, trash_path)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		t.Username, t.DisplayName, t.UID, t.GID, t.Port, t.Status, t.Version, t.CPUQuota,
-		t.MemoryMax, t.TasksMax, t.HomeDir, t.DataDir, t.UnitName, t.Notes, t.DiskBytes,
-		t.DiskChecked, t.LastHealthAt, t.LastHealthOK, t.LastActiveAt, t.LastError, t.CreatedAt, t.UpdatedAt,
-		t.DeletedAt, t.TrashPath)
+		t.MemoryMax, t.TasksMax, t.HomeDir, t.DataDir, t.UnitName, t.Notes, t.SSHEnabled,
+		t.DiskBytes, t.DiskQuotaGB, t.DiskChecked, t.LastHealthAt, t.LastHealthOK, t.LastActiveAt,
+		t.LastError, t.CreatedAt, t.UpdatedAt, t.DeletedAt, t.TrashPath)
 	if err != nil {
 		return err
 	}
@@ -53,12 +53,14 @@ func (s *Store) UpdateTenant(t *domain.Tenant) error {
 	t.UpdatedAt = now()
 	_, err := s.db.Exec(`UPDATE tenants SET
 		display_name=?, uid=?, gid=?, port=?, status=?, version=?, cpu_quota=?, memory_max=?,
-		tasks_max=?, home_dir=?, data_dir=?, unit_name=?, notes=?, disk_bytes=?, disk_checked_at=?,
-		last_health_at=?, last_health_ok=?, last_active_at=?, last_error=?, updated_at=?, deleted_at=?, trash_path=?
+		tasks_max=?, home_dir=?, data_dir=?, unit_name=?, notes=?, ssh_enabled=?, disk_bytes=?,
+		disk_quota_gb=?, disk_checked_at=?, last_health_at=?, last_health_ok=?, last_active_at=?,
+		last_error=?, updated_at=?, deleted_at=?, trash_path=?
 		WHERE id=?`,
 		t.DisplayName, t.UID, t.GID, t.Port, t.Status, t.Version, t.CPUQuota, t.MemoryMax,
-		t.TasksMax, t.HomeDir, t.DataDir, t.UnitName, t.Notes, t.DiskBytes, t.DiskChecked,
-		t.LastHealthAt, t.LastHealthOK, t.LastActiveAt, t.LastError, t.UpdatedAt, t.DeletedAt, t.TrashPath, t.ID)
+		t.TasksMax, t.HomeDir, t.DataDir, t.UnitName, t.Notes, t.SSHEnabled, t.DiskBytes,
+		t.DiskQuotaGB, t.DiskChecked, t.LastHealthAt, t.LastHealthOK, t.LastActiveAt,
+		t.LastError, t.UpdatedAt, t.DeletedAt, t.TrashPath, t.ID)
 	return err
 }
 
@@ -84,6 +86,12 @@ type TenantFilter struct {
 	Page           int
 	PageSize       int
 	IncludeTrashed bool
+	// HideDeleting drops rows that are on their way out. The public page uses
+	// it so a half-deleted instance neither shows up nor eats a page slot.
+	HideDeleting bool
+	// SkipNotes keeps the search on username and display name. Notes are the
+	// admin's own bookkeeping and must not be searchable from a public page.
+	SkipNotes bool
 }
 
 func (s *Store) ListTenants(f TenantFilter) ([]domain.Tenant, int, error) {
@@ -101,14 +109,32 @@ func (s *Store) ListTenants(f TenantFilter) ([]domain.Tenant, int, error) {
 	if f.Status != "" {
 		where = append(where, "status=?")
 		args = append(args, f.Status)
-	} else if !f.IncludeTrashed {
-		where = append(where, "status<>?")
-		args = append(args, domain.StatusTrashed)
+	} else {
+		hidden := []string{}
+		if !f.IncludeTrashed {
+			hidden = append(hidden, domain.StatusTrashed)
+		}
+		if f.HideDeleting {
+			hidden = append(hidden, domain.StatusDeleting)
+		}
+		if len(hidden) == 1 {
+			where = append(where, "status<>?")
+			args = append(args, hidden[0])
+		} else if len(hidden) > 1 {
+			where = append(where, "status NOT IN (?,?)")
+			args = append(args, hidden[0], hidden[1])
+		}
 	}
 	if q := strings.TrimSpace(f.Query); q != "" {
-		where = append(where, "(username LIKE ? OR display_name LIKE ? OR notes LIKE ?)")
-		like := "%" + q + "%"
-		args = append(args, like, like, like)
+		if f.SkipNotes {
+			where = append(where, "(username LIKE ? OR display_name LIKE ?)")
+			like := "%" + q + "%"
+			args = append(args, like, like)
+		} else {
+			where = append(where, "(username LIKE ? OR display_name LIKE ? OR notes LIKE ?)")
+			like := "%" + q + "%"
+			args = append(args, like, like, like)
+		}
 	}
 	clause := strings.Join(where, " AND ")
 

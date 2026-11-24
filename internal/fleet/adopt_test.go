@@ -7,8 +7,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"clawbench-fleet/internal/config"
+	"clawbench-fleet/internal/domain"
 )
 
 // seedExistingInstance creates a Linux account with a Clawbench data directory
@@ -295,5 +297,141 @@ func TestScanPrefersConfigPortOverForwardingPort(t *testing.T) {
 	}
 	if items[0].Port != main {
 		t.Fatalf("port = %d, want the main port %d (forwarding port was %d)", items[0].Port, main, fwd)
+	}
+}
+
+// An old ~/.clawbench directory often stays behind after an instance is moved
+// to another data directory. Its config still holds Clawbench's default port
+// (20000), so trusting it makes the scan report 20000 for a service that is
+// actually running on another port. The running process has to win.
+func TestScanPrefersRunningDataDirOverStaleHome(t *testing.T) {
+	svc, cfg := newTestService(t)
+	ctx := context.Background()
+	stale := freePort(t)
+	seedExistingInstance(t, svc, cfg, "alice", 5001, stale) // ~/.clawbench, not in use
+	live := freePort(t)
+	other := filepath.Join(cfg.DataDir, "srv", "alice")
+	if err := os.MkdirAll(filepath.Join(other, "config"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(other, "config", "config.yaml"), []byte("port: 20000\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	unit := svc.Cfg.UnitName("alice")
+	content := fmt.Sprintf("[Service]\nUser=alice\nExecStart=/opt/clawbench/current/clawbench --port %d --data-dir %s\n", live, other)
+	if err := svc.Sys.WriteUnit(ctx, unit, content); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Sys.Start(ctx, unit); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = svc.Sys.Stop(context.Background(), unit) })
+
+	items, err := svc.ScanAdoptable(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("candidates = %+v", items)
+	}
+	c := items[0]
+	if c.DataDir != other {
+		t.Fatalf("data dir = %q, want the running instance's %q", c.DataDir, other)
+	}
+	if c.Port != live || c.PortSource != "运行中的进程" {
+		t.Fatalf("port = %d (%s), want the live port %d", c.Port, c.PortSource, live)
+	}
+	if !c.HealthOK || c.Status != domain.StatusRunning {
+		t.Fatalf("live instance not detected: %+v", c)
+	}
+}
+
+// A stale config port can be held by a different account's instance. The
+// health check on 127.0.0.1 would succeed, so without checking who owns the
+// socket the scan reports somebody else's service as this user's instance.
+func TestScanDoesNotBorrowAnotherUsersPort(t *testing.T) {
+	svc, cfg := newTestService(t)
+	ctx := context.Background()
+	port := freePort(t)
+	seedExistingInstance(t, svc, cfg, "alice", 5001, port)
+	bobHome := seedExistingInstance(t, svc, cfg, "bob", 5002, port)
+
+	unit := svc.Cfg.UnitName("bob")
+	content := fmt.Sprintf("[Service]\nUser=bob\nExecStart=/opt/clawbench/current/clawbench --port %d --data-dir %s/.clawbench\n", port, bobHome)
+	if err := svc.Sys.WriteUnit(ctx, unit, content); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Sys.Start(ctx, unit); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = svc.Sys.Stop(context.Background(), unit) })
+
+	items, err := svc.ScanAdoptable(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var alice *AdoptCandidate
+	for i := range items {
+		if items[i].Username == "alice" {
+			alice = &items[i]
+		}
+	}
+	if alice == nil {
+		t.Fatalf("alice missing from %+v", items)
+	}
+	if alice.HealthOK || alice.ServiceActive {
+		t.Fatalf("alice must not be marked running on bob's port: %+v", alice)
+	}
+	if alice.PortOwner != "bob" || alice.Blocked == "" {
+		t.Fatalf("port owner = %q blocked = %q", alice.PortOwner, alice.Blocked)
+	}
+}
+
+func TestAdoptTenantsAsyncReportsProgress(t *testing.T) {
+	svc, cfg := newTestService(t)
+	port := freePort(t)
+	seedExistingInstance(t, svc, cfg, "alice", 5001, port)
+
+	job, err := svc.AdoptTenantsAsync(context.Background(), []string{"alice", "ghost"}, AuditContext{Actor: "tester"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Total != 2 {
+		t.Fatalf("job total = %d, want 2", job.Total)
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	var got *domain.Job
+	for {
+		got, err = svc.Job(job.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status == domain.JobSucceeded || got.Status == domain.JobFailed || got.Status == domain.JobPartial {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("adopt job did not finish: %+v", got)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// One account is adopted, the other one does not exist: the job is partial
+	// and the per-account results stay in the order the page sent them.
+	if got.Status != domain.JobPartial {
+		t.Fatalf("job status = %q, want partial (%+v)", got.Status, got)
+	}
+	if len(got.Items) != 2 {
+		t.Fatalf("job items = %+v", got.Items)
+	}
+	if got.Items[0].Name != "alice" || got.Items[0].Status != domain.JobSucceeded || got.Items[0].Error != "" {
+		t.Fatalf("alice item = %+v", got.Items[0])
+	}
+	if got.Items[1].Name != "ghost" || got.Items[1].Status != domain.JobFailed || got.Items[1].Error == "" {
+		t.Fatalf("ghost item = %+v", got.Items[1])
+	}
+	if _, err := svc.Store.GetTenantByUsername("alice"); err != nil {
+		t.Fatalf("alice was not adopted: %v", err)
 	}
 }

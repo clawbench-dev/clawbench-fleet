@@ -4,6 +4,7 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"clawbench-fleet/internal/domain"
 )
@@ -28,6 +29,131 @@ func newTenant(username string, port int, status string) *domain.Tenant {
 		HomeDir: "/home/" + username, DataDir: "/home/" + username + "/.clawbench",
 		UnitName: "clawbench-" + username + ".service",
 	}
+}
+
+func TestTenantSSHEnabledRoundTrip(t *testing.T) {
+	st := openTestStore(t)
+	tenant := newTenant("alice", 21000, domain.StatusRunning)
+	tenant.SSHEnabled = true
+	if err := st.CreateTenant(tenant); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.GetTenant(tenant.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.SSHEnabled {
+		t.Fatal("ssh_enabled was not persisted")
+	}
+	got.SSHEnabled = false
+	if err := st.UpdateTenant(got); err != nil {
+		t.Fatal(err)
+	}
+	again, err := st.GetTenant(tenant.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.SSHEnabled {
+		t.Fatal("ssh_enabled update was not persisted")
+	}
+}
+
+func TestChangePortMovesAndRejectsConflicts(t *testing.T) {
+	st := openTestStore(t)
+	alice := newTenant("alice", 21000, domain.StatusRunning)
+	bob := newTenant("bob", 21003, domain.StatusRunning)
+	for _, tenant := range []*domain.Tenant{alice, bob} {
+		if err := st.CreateTenant(tenant); err != nil {
+			t.Fatal(err)
+		}
+	}
+	portsA, err := st.AllocatePorts(21000, 21010, 3, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AssignPorts(alice.ID, portsA); err != nil {
+		t.Fatal(err)
+	}
+	portsB, err := st.AllocatePorts(21000, 21010, 3, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AssignPorts(bob.ID, portsB); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := st.ChangePort(alice.ID, portsA[0], portsA[1]); err != nil {
+		t.Fatalf("move to own free port: %v", err)
+	}
+	if state, err := st.PortState(portsA[0]); err != nil || state != "free" {
+		t.Fatalf("old port state = %q %v", state, err)
+	}
+	if state, err := st.PortState(portsA[1]); err != nil || state != "allocated" {
+		t.Fatalf("new port state = %q %v", state, err)
+	}
+
+	if err := st.ChangePort(alice.ID, portsA[1], portsB[0]); err == nil {
+		t.Fatal("must not steal a port owned by another tenant")
+	}
+	if err := st.ChangePort(alice.ID, portsA[1], portsA[1]); err != nil {
+		t.Fatalf("same port should be a no-op: %v", err)
+	}
+	if err := st.ChangePort(alice.ID, portsA[1], 0); err == nil {
+		t.Fatal("invalid port must be rejected")
+	}
+	// A port outside the configured range has no row and is recorded on demand.
+	if err := st.ChangePort(alice.ID, portsA[1], 21500); err != nil {
+		t.Fatalf("move outside range: %v", err)
+	}
+	if state, err := st.PortState(21500); err != nil || state != "allocated" {
+		t.Fatalf("on-demand port state = %q %v", state, err)
+	}
+}
+
+func TestChangePortReportsClosedDatabase(t *testing.T) {
+	st := openTestStore(t)
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ChangePort(1, 21000, 21001); err == nil {
+		t.Fatal("ChangePort should fail after the database is closed")
+	}
+}
+
+func TestChangePortReportsDatabaseErrors(t *testing.T) {
+	t.Run("query", func(t *testing.T) {
+		st := openTestStore(t)
+		if _, err := st.db.Exec(`DROP TABLE ports`); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.ChangePort(1, 21000, 21001); err == nil {
+			t.Fatal("missing ports table should fail the lookup")
+		}
+	})
+	t.Run("insert", func(t *testing.T) {
+		st := openTestStore(t)
+		if err := st.ClaimPort(21000, 1); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.db.Exec(`CREATE TRIGGER fail_insert BEFORE INSERT ON ports BEGIN SELECT RAISE(ABORT, 'no insert'); END`); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.ChangePort(1, 21000, 21500); err == nil {
+			t.Fatal("insert trigger should fail the move")
+		}
+	})
+	t.Run("release", func(t *testing.T) {
+		st := openTestStore(t)
+		if err := st.ClaimPort(21000, 1); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.db.Exec(`CREATE TRIGGER fail_update BEFORE UPDATE ON ports BEGIN SELECT RAISE(ABORT, 'no update'); END`); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.ChangePort(1, 21000, 21500); err == nil {
+			t.Fatal("update trigger should fail the release of the old port")
+		}
+	})
 }
 
 func TestOpenIsIdempotent(t *testing.T) {
@@ -357,5 +483,57 @@ func TestAuditLog(t *testing.T) {
 	deleted, err := st.PurgeAuditBefore("2999-01-01T00:00:00Z")
 	if err != nil || deleted != 3 {
 		t.Fatalf("purge = %d %v", deleted, err)
+	}
+}
+
+func TestMetricSamplesRoundTrip(t *testing.T) {
+	st := openTestStore(t)
+	tenant := newTenant("metrics", 21000, domain.StatusRunning)
+	if err := st.CreateTenant(tenant); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now().Format(time.RFC3339)
+	if err := st.AddMetricSample(tenant.ID, domain.MetricSample{
+		At: at, CPUPercent: 12.5, MemoryBytes: 1024, PIDs: 3, DiskBytes: 2048,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.MetricHistory(tenant.ID, time.Now().Add(-time.Hour), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].CPUPercent != 12.5 || got[0].DiskBytes != 2048 || got[0].At != at {
+		t.Fatalf("history = %+v", got)
+	}
+	// The limit is applied and the default is a sane cap.
+	if _, err := st.MetricHistory(tenant.ID, time.Now().Add(-time.Hour), 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.MetricHistory(tenant.ID, time.Now().Add(time.Hour), 10); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTenantDiskQuotaRoundTrip(t *testing.T) {
+	st := openTestStore(t)
+	tenant := newTenant("disk", 21000, domain.StatusRunning)
+	tenant.DiskQuotaGB = 12
+	if err := st.CreateTenant(tenant); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.GetTenant(tenant.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.DiskQuotaGB != 12 {
+		t.Fatalf("disk quota = %d", got.DiskQuotaGB)
+	}
+	got.DiskQuotaGB = 0
+	if err := st.UpdateTenant(got); err != nil {
+		t.Fatal(err)
+	}
+	again, _ := st.GetTenant(tenant.ID)
+	if again.DiskQuotaGB != 0 {
+		t.Fatalf("disk quota after update = %d", again.DiskQuotaGB)
 	}
 }

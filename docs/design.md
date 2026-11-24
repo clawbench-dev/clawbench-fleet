@@ -37,7 +37,8 @@
 - 多管理员和角色权限（超管、只读运维、审计）。
 - 对接企业通讯录/LDAP，离职自动停用。
 - 员工门户 + 免密跳转。
-  - 2026-11-20 已补一个更小的版本：`/guest` 免登录只读页，只显示显示名、登录名、端口、地址、状态，可报障；不能进入实例。
+  - 2026-11-20 已补一个更小的版本：`/guest` 免登录只读页，可报障；不能进入实例。
+  - 2026-11-24 自助页改为复用管理员租户列表（同一张表、同样的搜索/状态筛选/分页），按钮按身份隐藏：管理员的启停、重启、批量操作、新建、扫描、导入和「详情」入口都不对游客开放。展示字段收紧到不含家目录、UID/GID、systemd 单元、备注和最近错误。
 - 多机调度（每台机器一个 agent）。
 - 钉钉/飞书/邮件告警。
 - 接管已经在跑的 Clawbench 实例。
@@ -57,13 +58,20 @@
 - 拿到管理员给的地址（例如 `http://10.0.0.5:21001`）和初始密码。
 - 直接在浏览器打开自己的 Clawbench，登录后使用。
 - 员工可以在自己的实例里改密码、配模型、装 Skill、跑终端。
-- 员工**不能** SSH 登录服务器，也**不能** sudo。
+- 开了 SSH 的租户可以用同一个密码 `ssh 用户名@服务器` 登录；密码只在创建、重置或重新开启 SSH 时显示一次。员工仍然**不能** sudo。
+- 平台不修改 sshd 配置：服务器要求密钥登录或关闭密码登录时，以服务器策略为准。
 
 ### 3.3 安全边界（必须说清楚）
 
+资源上限的执行方式：
+
+- CPU、内存、进程数交给 systemd 的 cgroup 限制，超了会被系统直接卡住或杀掉。
+- 磁盘上限每 5 分钟量一次家目录。超限时平台停掉实例、按进程属主结束这个账号的所有进程（包括从 SSH 进来的 shell，不只是实例本体）、锁定 Linux 密码，并把原因写进实例状态；启动或重启前再量一次，仍然超限就不让起来。管理员清理文件或调大上限后点「启动」即可恢复。
+- 用量历史每 5 分钟记一个点，默认保留 7 天，可在设置页改成 1-90 天。
+
 这套隔离防的是“误操作”和“资源抢占”，**不是**防恶意租户。
 
-- 员工在自己的实例里有终端，可以以自己的 Linux 用户身份运行任意命令。
+- 员工在自己的实例里有终端，可以以自己的 Linux 用户身份运行任意命令；开了 SSH 的账号还能从外部登录，权限边界仍然是这个 Linux 用户。
 - 员工能读到自己家目录下的所有文件，包括自己的 `config.yaml` 和数据库。
 - 员工之间不能读对方的家目录（Linux 权限 700），但不能防内核漏洞或提权漏洞。
 - 如果客户要求“员工之间绝对不能互相攻击”，需要上容器或虚拟机，这不是本项目的范围。
@@ -243,7 +251,7 @@
 
 ### 7.1 建号（单个）
 
-输入：登录名、显示名、备注、可选配额（不填用默认值）。
+输入：登录名、显示名、备注、可选配额（不填用默认值）、是否开 SSH（默认按平台设置）。
 
 步骤：
 
@@ -254,6 +262,8 @@
    - UID 从配置的范围里找空闲值（默认 3000–9999）。
    - 家目录权限 0700。
 4. 生成初始密码（12 位，字母 + 数字，避开容易混淆的字符）。
+   - 开了 SSH：`usermod -s /bin/bash`，再用 `chpasswd` 通过标准输入设置同一个密码，密码不出现在命令行里。
+   - 没开 SSH：保留 `nologin`，并用 `passwd -l` 锁定密码。
 5. 写租户配置 `~/.clawbench/config/config.yaml`：
    ```yaml
    port: <主端口>
@@ -496,11 +506,23 @@ bob,李四,产品部
 - 升级期间员工会短暂断线（重启实例），页面要提前提示。
 - Clawbench 有客户端/服务端版本兼容检查，升级服务端后旧客户端可能被拦；升级前要提示管理员。
 
+平台自身升级（升级平台，不是升级实例）：
+
+- 升级中心多一个「升级平台自身」区块，上传的是 `clawbench-fleet` 自己的二进制，和第 7.10 节升级租户实例完全是两条线，互不影响。
+- 顺序固定为：写临时文件 → 跑 `--version` 读出上传的版本 → 备份当前程序到 `<程序路径>.bak` → 原子替换 → 重启 `clawbench-fleet.service`。
+- 所有能失败的事都在替换之前：文件不是可运行程序、版本和当前完全一样、程序目录不可写、备份失败，都会直接报错，此时磁盘上的程序一个字节都没变，平台照常运行，可以重试。
+- 替换用的是「先写到同目录临时文件再改名」，任何一步失败都保证目录里仍然有一个能启动的程序，不会出现「装到一半没有二进制」的不可恢复状态。
+- 重启之后这个进程就没了，HTTP 响应必须在重启之前写出去。页面收到「已开始重启」后改成每 2 秒问一次 `/api/health`，版本对上才刷新，最多等 3 分钟。
+- 重启命令发出失败（例如 systemd 没在跑）时，新程序已经在磁盘上但进程还是旧的，接口会同时返回结果和一句警告，提示手工执行 `systemctl restart clawbench-fleet`。
+- `--dev` 模式下不允许：开发时跑的就是本地构建出来的程序，替换没有意义，还会把文件换掉却不重启。
+- 回退办法：停服务，把 `<程序路径>.bak` 覆盖回去，再启动。
+
 ### 7.11 健康检查与对账
 
 - 每 30 秒检查一次所有 `running` 状态的租户：
   - `systemctl is-active` 是否为 `active`。
   - `http://127.0.0.1:<端口>/api/health` 是否返回 `app=clawbench`。
+  - 实例自己开了 HTTPS 时，HTTP 请求会收到 301，平台跟着跳转到 HTTPS 再问一次。证书是实例自己签的，平台只对回环地址放宽证书校验，返回内容仍要求 `app=clawbench`。
 - 连续 2 次失败标记为 `error`，记录原因，不自动删除任何东西。
 - systemd 自身配置 `Restart=always`，进程崩溃会自动拉起；健康检查只负责“发现并展示”，不替代 systemd。
 - 平台启动时做一次对账：
@@ -526,7 +548,7 @@ bob,李四,产品部
 - 平台遍历本机用户，符合条件的列出来：登录名、UID、家目录、端口及来源、是否已有 systemd 单元、服务是否在跑、健康检查是否通过、版本、现有配额。
 - 已经在管理列表里的账号也会列出来，标“已纳管”，不可勾选。
 - 端口已经被别的租户占用的，标红不可勾选。
-- 主端口有进程在听、但没响应 HTTP 健康检查（例如实例自己开了 HTTPS）的，标红不可纳管，并写明原因。
+- 主端口有进程在听、但 HTTP 和 HTTPS 健康检查都不通的，标红不可纳管，并写明原因。实例自己开了 HTTPS 不影响纳管：平台会跟着它的跳转用 HTTPS 再问一次。
 - 平台还没装 Clawbench 版本时全部标红，先去升级中心装一份。
 - 扫描不写数据库、不碰服务。
 
@@ -540,10 +562,25 @@ bob,李四,产品部
 
 纳管会短暂中断实例几秒。已经纳管的账号再次扫描会显示“已纳管”。
 
+一次勾选多个账号时，平台最多并行处理 3 个：每个账号是一个后台任务项，页面能实时看到“排队中 / 处理中 / 已纳入 / 失败”和失败原因，不用干等一个长请求。整批只读取一次系统用户、单元和监听端口，不再为每个账号重复扫全机。
+
+**改端口**
+
+已经纳管的实例可以在详情页改主端口。平台会先确认新端口没有被其他租户或本机程序占用，然后在端口表里一次性把旧端口释放、新端口登记到这个租户，再重写 `config.yaml` 和 systemd 单元；运行中的实例会重启一次并按新端口做健康检查。员工访问地址随之变化，需要重新通知员工。
+
 **root 的特殊处理**
 
 - root 有 `.clawbench` 数据目录时同样纳管，家目录按 `/etc/passwd` 的真实值（通常是 `/root`），不是 `/home/root`。
 - root 可以启动、停止、重启、看日志、备份，但**不能删除**：删除接口直接拒绝，界面上删除按钮置灰。这一点在数据模型里不额外存字段，按登录名 `root` 判定。
+
+### 7.13 默认资源上限下发
+
+设置页的默认资源上限（CPU / 内存 / 进程数）可以随时修改，保存后只影响新建租户。要让已有实例也用上，点“应用到所有实例”：
+
+1. 平台先保存当前设置，再列出所有需要改的实例。回收站、正在创建、正在删除的实例跳过；已经是目标值的实例也不重复处理。
+2. 每个实例作为一个后台任务项，最多并行处理 3 个。运行中的实例会重写 systemd 单元、重启一次并等待健康检查；已停止或启动失败的实例只改单元，下次启动生效。
+3. 已经有单独设置过配额的实例也会被覆盖，确认弹窗会明确提示这一点。
+4. 任务进度和每个实例的结果都在弹窗里实时显示，关掉弹窗任务仍在后台继续。
 
 ---
 
@@ -564,7 +601,7 @@ Group=<username>
 WorkingDirectory=/home/<username>
 Environment=HOME=/home/<username>
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
-ExecStart=/opt/clawbench-fleet/current/clawbench --port <port> --data-dir /home/<username>/.clawbench --managed
+ExecStart=/opt/clawbench-fleet/current/clawbench --port <port> --data-dir /home/<username>/.clawbench
 Restart=always
 RestartSec=3
 TimeoutStopSec=30
@@ -580,7 +617,7 @@ WantedBy=multi-user.target
 
 说明：
 
-- `--managed` 关闭实例自己的升级和重启接口，防止员工绕过平台换二进制。
+- 不传 `--managed`，员工可以在实例里自己重启；systemd 的 `Restart=always` 会把它重新拉起来。实例内升级会因为程序目录不可写而直接报错，版本升级统一走平台的升级中心。
 - `--port` 覆盖配置文件里的端口，员工改配置也改不了对外端口。
 - 不设置 `PrivateTmp`、`ProtectHome` 等会影响终端和工具运行的选项。
 - 资源限制用 systemd 的 cgroup 能力；需要 cgroup v2（Ubuntu 22.04+/Debian 12+ 默认满足）。
@@ -597,10 +634,10 @@ WantedBy=multi-user.target
 | 租户详情 | 单个租户的全部操作 | 地址/端口/版本/状态、启动/停止/重启、重置密码、配额修改、日志、备份列表、操作记录 |
 | 新建租户 | 单个建号 | 登录名、显示名、备注、配额；成功后弹窗显示地址和初始密码 |
 | 批量导入 | CSV 导入 | 上传、预览（可导入/有问题）、开始导入、进度、下载成功/失败清单 |
-| 升级中心 | 版本管理 | 当前版本、从 npm 安装、离线上传、已安装版本、试点、批量升级、回滚、任务进度 |
+| 升级中心 | 版本管理 | 当前版本、从 npm 安装、离线上传、已安装版本、试点、批量升级、回滚、任务进度；另有「升级平台自身」区块 |
 | 回收站 | 误删恢复 | 已删除租户、占用大小、剩余天数、恢复、强制删除 |
 | 审计日志 | 追责 | 时间、操作人、动作、对象、结果、IP；按条件筛选 |
-| 设置 | 平台配置 | 端口范围、默认配额、备份时间/保留天数、回收站天数、审计保留天数、改管理员密码 |
+| 设置 | 平台配置 | 端口范围、默认配额（可一键下发到所有实例）、备份时间/保留天数、回收站天数、审计保留天数、改管理员密码 |
 
 界面风格：
 
@@ -646,18 +683,23 @@ WantedBy=multi-user.target
 | GET | `/api/tenants` | 列表，支持 `q`、`status`、`page`、`page_size` |
 | POST | `/api/tenants` | 新建，返回租户信息和一次性初始密码 |
 | GET | `/api/tenants/{id}` | 详情 |
-| PATCH | `/api/tenants/{id}` | 改显示名、备注、配额 |
+| PATCH | `/api/tenants/{id}` | 改显示名、备注、配额、端口；只有配额或端口变化才会重写单元并重启 |
 | DELETE | `/api/tenants/{id}` | 删除到回收站，要求 body 里带登录名确认 |
 | POST | `/api/tenants/{id}/start` | 启动 |
 | POST | `/api/tenants/{id}/stop` | 停止 |
 | POST | `/api/tenants/{id}/restart` | 重启 |
 | POST | `/api/tenants/{id}/reset-password` | 重置密码，返回一次性新密码 |
+| POST | `/api/tenants/{id}/ssh` | 开/关该租户的 SSH，body：`{enabled}` |
+| GET | `/api/ssh/status` | 本机 sshd 是否安装、运行、允许密码登录 |
 | GET | `/api/tenants/{id}/logs` | 日志，`lines` 参数 |
 | GET | `/api/tenants/{id}/metrics` | CPU/内存/进程数/磁盘缓存 |
+| GET | `/api/tenants/{id}/metrics/history` | 用量历史，`range=24h\|7d` |
+| POST | `/api/tenants/{id}/disk/refresh` | 立即统计该租户磁盘占用 |
+| POST | `/api/tenants/{id}/apply-config` | 把统一配置重新下发到该租户 |
 | POST | `/api/tenants/{id}/repair` | 重写配置和 systemd 单元并重启 |
-| POST | `/api/tenants/bulk` | 批量操作，body：`{action, ids}` |
+| POST | `/api/tenants/bulk` | 批量操作，body：`{action, ids}`；action 含 start/stop/restart/quota/reset-password |
 | GET | `/api/tenants/scan` | 扫描本机已有实例，返回可纳管的账号列表，不落库 |
-| POST | `/api/tenants/adopt` | 纳管已有实例，body：`{usernames: []}`，返回逐个结果 |
+| POST | `/api/tenants/adopt` | 纳管已有实例，body：`{usernames: []}`，返回后台任务，按任务项查看逐个结果 |
 | POST | `/api/tenants/import/preview` | 上传 CSV 预览，不落库 |
 | POST | `/api/tenants/import` | 开始导入，返回任务 ID |
 
@@ -689,6 +731,9 @@ WantedBy=multi-user.target
 | POST | `/api/upgrades/{version}/pilot` | 试点，body：`{tenant_id}` |
 | POST | `/api/upgrades/{version}/apply` | 批量升级 |
 | POST | `/api/upgrades/rollback` | 回滚到上一版 |
+| GET | `/api/upgrades/self` | 平台自身版本、程序路径、是否支持自升级 |
+| POST | `/api/upgrades/self` | 上传平台二进制（multipart），替换并重启平台服务 |
+| POST | `/api/upgrades/self/adopt` | 把手工启动（nohup）的平台写进 systemd、设成开机自启、停掉旧进程并重启；要求配置文件在 `/etc/clawbench-fleet/config.yaml` |
 
 ### 10.7 任务、审计、设置
 
@@ -698,6 +743,11 @@ WantedBy=multi-user.target
 | GET | `/api/audit` | 审计列表，支持筛选和分页 |
 | GET | `/api/settings` | 平台设置 |
 | PATCH | `/api/settings` | 修改设置 |
+| PUT | `/api/settings/tenant-config` | 保存统一下发到各实例的配置片段 |
+| POST | `/api/settings/apply-config` | 把统一配置下发到所有实例，返回后台任务 |
+| POST | `/api/settings/apply-quota` | 把当前默认资源上限下发到所有实例，返回后台任务 |
+| GET | `/api/settings/cert` | 实例 HTTPS 证书状态（是否存在、覆盖哪些地址、到期时间） |
+| POST | `/api/settings/cert/regenerate` | 重新生成自签证书，失败时保留旧证书 |
 | GET | `/api/health` | 平台自身健康检查（公开） |
 
 ---
@@ -1048,7 +1098,7 @@ tls:
 - [ ] 升级试点失败能自动回滚。
 - [ ] 批量升级中途失败能停止并回滚。
 - [ ] 审计能看到所有写操作，且没有密码/密钥。
-- [ ] 普通租户不能 SSH、不能 sudo、不能读别人的家目录。
+- [ ] 开了 SSH 的租户能用网页同一个密码 SSH 登录，关掉的不能；所有租户都不能 sudo。
 
 ---
 
@@ -1119,7 +1169,6 @@ tls:
 |---|---|
 | `--port` 覆盖配置端口 | 保证员工改配置也改不了对外端口 |
 | `--data-dir` 指定数据目录 | 每个租户一个目录，避免实例锁冲突 |
-| `--managed` | 关闭实例自升级和自重启 |
 | `GET /api/health` | 公开，返回 `app=clawbench`、`version`、`protocol`、`pid` |
 | 配置路径 `<data-dir>/config/config.yaml` | 平台写端口、密码、端口转发开关 |
 | 密码格式 `sha256:<hex>` | 哈希算法 `sha256(密码 + "clawbench-salt")` |
