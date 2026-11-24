@@ -32,7 +32,9 @@ if [ -n "$STAGED_GO" ]; then
         # Turn staged file paths into unique package directories.
         PKGS=$(echo "$STAGED_GO" | xargs -n1 dirname | sort -u | sed 's|^|./|' | sed 's|$|/...|')
         echo "Running golangci-lint on staged packages..."
-        cd "${repoRoot}" || exit 1
+        # Resolved at run time so a worktree lints its own files.
+        ROOT=$(git rev-parse --show-toplevel) || exit 1
+        cd "$ROOT" || exit 1
         golangci-lint run $PKGS || STATUS=1
     else
         echo "golangci-lint not installed; run ./scripts/lint-go.sh once to install it."
@@ -43,7 +45,8 @@ STAGED_WEB=$(git diff --cached --name-only --diff-filter=ACM -- 'web/src/**/*.ts
 if [ -n "$STAGED_WEB" ] && [ -x "${repoRoot}/web/node_modules/.bin/eslint" ]; then
     STAGED_WEB_REL=$(echo "$STAGED_WEB" | sed 's|^web/||')
     echo "Running ESLint on staged frontend files..."
-    (cd "${repoRoot}/web" && npx eslint $STAGED_WEB_REL) || STATUS=1
+    ROOT=$(git rev-parse --show-toplevel) || exit 1
+    (cd "$ROOT/web" && npx eslint $STAGED_WEB_REL) || STATUS=1
 fi
 
 if [ $STATUS -ne 0 ]; then
@@ -65,7 +68,11 @@ const prePushScript = `#!/bin/sh
 # Installed by: npm run prepare (scripts/install-hooks.mjs)
 # Skip once (not for merging): git push --no-verify
 
-cd "${repoRoot}" || exit 1
+# Resolve the checkout at run time rather than baking in ${repoRoot}: the same
+# hooks directory serves every worktree, and a hard-coded path would make a push
+# from a worktree check the main checkout's code instead of its own.
+ROOT=$(git rev-parse --show-toplevel) || exit 1
+cd "$ROOT" || exit 1
 exec ./scripts/pre-push-checks.sh
 `;
 
