@@ -401,6 +401,43 @@ func TestSelfUpgradeInfoReportsAdoption(t *testing.T) {
 	}
 }
 
+// TestSelfUpgradeInfoTreatsAnEmptyUnitAsNotAdopted: adoption is a lasting fact
+// only because the unit file survives a restart. A unit that exists but is
+// empty would not start anything, so the page must keep offering the button —
+// pressing it only rewrites the same file.
+func TestSelfUpgradeInfoTreatsAnEmptyUnitAsNotAdopted(t *testing.T) {
+	svc, _ := withSelfSys(t)
+	if err := svc.Sys.WriteUnit(context.Background(), sysops.SelfUnit, "   \n"); err != nil {
+		t.Fatal(err)
+	}
+	if info := svc.SelfUpgradeInfo(context.Background()); info["adopted"] != false {
+		t.Fatalf("an empty unit is not adoption: %+v", info)
+	}
+	// The same blank unit must not unlock the upgrade either.
+	if _, err := svc.UploadSelf(context.Background(), strings.NewReader("new build"), 1<<20, AuditContext{Actor: "tester"}); err == nil {
+		t.Fatal("an empty unit must not count as a restart target")
+	}
+}
+
+// TestSelfUpgradeInfoTreatsAnUnreadableUnitAsNotAdopted covers the other half
+// of the same rule: if the unit cannot be read, the platform cannot promise a
+// restart, and offering the upgrade would be a guess.
+func TestSelfUpgradeInfoTreatsAnUnreadableUnitAsNotAdopted(t *testing.T) {
+	svc, sys := withSelfSys(t)
+	// A unit that is a non-empty directory at the path the backend reads makes
+	// the read fail without needing root, which is what an unreadable file looks
+	// like from here. The fake also caches units in memory, so a fresh instance
+	// pointed at that directory is what actually exercises the error path.
+	bad := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(bad, "units", sysops.SelfUnit, "x"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	svc.Sys = sysops.NewFake(bad, sys.InstallDir)
+	if info := svc.SelfUpgradeInfo(context.Background()); info["adopted"] != false {
+		t.Fatalf("an unreadable unit is not adoption: %+v", info)
+	}
+}
+
 // TestSelfUpgradeInfoNeverClaimsAdoptionInDev keeps the status line out of the
 // dev server, which has no unit to point at.
 func TestSelfUpgradeInfoNeverClaimsAdoptionInDev(t *testing.T) {
