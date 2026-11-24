@@ -49,6 +49,11 @@ type AdoptCandidate struct {
 	Status         string   `json:"status"`
 	Blocked        string   `json:"blocked"`
 	Warnings       []string `json:"warnings"`
+
+	// PortOwner is the account whose process holds Port when it is not this
+	// account. A stale config port can be taken over by somebody else's
+	// instance; that process must never be reported as this user's service.
+	PortOwner string `json:"port_owner,omitempty"`
 }
 
 type AdoptResult struct {
@@ -71,6 +76,11 @@ type scanEnv struct {
 	unitSet   map[string]bool
 	managed   map[string]bool
 	listeners map[string][]sysops.Listener
+	// portOwners records which accounts hold a listening socket on each port.
+	// A port read from a config file says nothing about who is listening on
+	// it, so this is what keeps one user's process from being attributed to
+	// another user.
+	portOwners map[int][]string
 }
 
 // ScanAdoptable lists local accounts that already own a Clawbench data
@@ -248,10 +258,11 @@ func (s *Service) loadScanEnv(ctx context.Context) (*scanEnv, error) {
 		return nil, fmt.Errorf("读取系统用户失败：%w", err)
 	}
 	env := &scanEnv{
-		users:     users,
-		unitSet:   map[string]bool{},
-		managed:   map[string]bool{},
-		listeners: map[string][]sysops.Listener{},
+		users:      users,
+		unitSet:    map[string]bool{},
+		managed:    map[string]bool{},
+		listeners:  map[string][]sysops.Listener{},
+		portOwners: map[int][]string{},
 	}
 	if units, err := s.Sys.ListUnits(ctx); err == nil {
 		for _, u := range units {
@@ -269,10 +280,33 @@ func (s *Service) loadScanEnv(ctx context.Context) (*scanEnv, error) {
 		for _, l := range listeners {
 			if l.Username != "" {
 				env.listeners[l.Username] = append(env.listeners[l.Username], l)
+				env.addPortOwner(l.Port, l.Username)
 			}
 		}
 	}
 	return env, nil
+}
+
+// addPortOwner remembers that username holds a socket on port. Duplicates are
+// skipped because ss prints one line per address family.
+func (e *scanEnv) addPortOwner(port int, username string) {
+	for _, owner := range e.portOwners[port] {
+		if owner == username {
+			return
+		}
+	}
+	e.portOwners[port] = append(e.portOwners[port], username)
+}
+
+// foreignPortOwner returns the account holding port when it is not username.
+// Empty means nothing is known to hold the port, or this account holds it.
+func (e *scanEnv) foreignPortOwner(username string, port int) string {
+	for _, owner := range e.portOwners[port] {
+		if owner != username {
+			return owner
+		}
+	}
+	return ""
 }
 
 // inspectUser turns one account into a candidate. ok is false for accounts
@@ -296,7 +330,7 @@ func (s *Service) inspectUser(ctx context.Context, env *scanEnv, u sysops.UserIn
 
 // isTenantAccount filters out system accounts and the platform's own account.
 func isTenantAccount(u sysops.UserInfo) bool {
-	return u.Username != "" && u.Username != "clawbench-fleet" && u.Home != "" && u.Home != "/"
+	return u.Username != "" && u.Username != platformName && u.Home != "" && u.Home != "/"
 }
 
 func (s *Service) baseCandidate(env *scanEnv, u sysops.UserInfo) AdoptCandidate {
@@ -325,27 +359,47 @@ func (s *Service) unitContentFor(ctx context.Context, env *scanEnv, c *AdoptCand
 
 // resolveDataDir prefers the --data-dir recorded in the unit, then the home
 // directory default, and finally a directory seen in a listening process.
+// A running instance wins over a directory nobody is listening on: an old
+// ~/.clawbench left behind would otherwise make the scan fall back to the
+// config file, whose port is usually still Clawbench's default 20000.
 func resolveDataDir(u sysops.UserInfo, unitContent string, listeners []sysops.Listener) string {
 	dir := filepath.Join(u.Home, ".clawbench")
 	if m := unitDataRe.FindStringSubmatch(unitContent); len(m) == 2 {
 		dir = m[1]
 	}
 	dirs := listenerDataDirs(listeners)
-	if !dirExists(dir) && len(dirs) > 0 {
-		dir = dirs[0]
+	if len(dirs) == 0 {
+		return dir
 	}
-	return dir
+	for _, d := range dirs {
+		if samePath(d, dir) {
+			return dir
+		}
+	}
+	return dirs[0]
+}
+
+func samePath(a, b string) bool {
+	return filepath.Clean(a) == filepath.Clean(b)
 }
 
 // applyUnitSettings copies the limits the instance was started with. The unit
-// wins; the config file is the fallback for the port only.
+// wins; the config file is the fallback for the port only. The port belongs to
+// the unit's own data directory: when the scan picked another directory
+// because that instance is the one running, the unit's --port describes a
+// different process and must not be used.
 func applyUnitSettings(c *AdoptCandidate, unitContent string) {
 	c.PortSource = "配置文件"
-	if m := unitPortRe.FindStringSubmatch(unitContent); len(m) == 2 {
-		c.Port, _ = strconv.Atoi(m[1])
-		c.PortSource = "systemd 单元"
-	} else if port := readConfigPort(filepath.Join(c.DataDir, "config", "config.yaml")); port > 0 {
-		c.Port = port
+	if unitDir := dataDirFromCmd(unitContent); unitDir == "" || samePath(unitDir, c.DataDir) {
+		if m := unitPortRe.FindStringSubmatch(unitContent); len(m) == 2 {
+			c.Port, _ = strconv.Atoi(m[1])
+			c.PortSource = "systemd 单元"
+		}
+	}
+	if c.Port == 0 {
+		if port := readConfigPort(filepath.Join(c.DataDir, "config", "config.yaml")); port > 0 {
+			c.Port = port
+		}
 	}
 	if m := unitCPURe.FindStringSubmatch(unitContent); len(m) == 2 && cpuQuotaRe.MatchString(m[1]) {
 		c.CPUQuota = m[1]
@@ -390,7 +444,13 @@ func (s *Service) enrichCandidates(ctx context.Context, env *scanEnv, cands []Ad
 					c.Warnings = append(c.Warnings, fmt.Sprintf("这个数据目录有 %d 个进程在监听，平台按端口 %d 纳管", count, live.port))
 				}
 			} else if c.Port > 0 {
-				if info, err := s.healthCheck(cctx, c.Port); err == nil {
+				// A port taken from the config file says nothing about who is
+				// listening there. When another account owns the socket, this
+				// account's instance is not the one answering the health
+				// check, so it must not be reported as running on that port.
+				if owner := env.foreignPortOwner(c.Username, c.Port); owner != "" {
+					c.PortOwner = owner
+				} else if info, err := s.healthCheck(cctx, c.Port); err == nil {
 					c.HealthOK = true
 					c.Version = info.Version
 				}
@@ -484,6 +544,8 @@ func (s *Service) candidateBlockedReason(c *AdoptCandidate) string {
 		return "数据目录里没有 config.yaml，纳管会丢掉原有密码，暂不纳管"
 	case s.portTaken(c.Port):
 		return fmt.Sprintf("端口 %d 已经被其他租户占用", c.Port)
+	case c.PortOwner != "":
+		return fmt.Sprintf("端口 %d 上的服务属于账号 %s，不是这个用户", c.Port, c.PortOwner)
 	case c.ServiceActive && !c.HealthOK:
 		return fmt.Sprintf("端口 %d 上的程序没响应 Clawbench 健康检查（HTTP 和 HTTPS 都没通，可能还没启动完，也可能不是 Clawbench），暂不纳管", c.Port)
 	case !s.clawbenchBinaryReady():
@@ -508,7 +570,7 @@ func (s *Service) addCandidateWarnings(c *AdoptCandidate) {
 	if c.ServiceActive && !c.UnitExists {
 		c.Warnings = append(c.Warnings, "实例是手动启动的，纳入时会先停掉它再交给 systemd")
 	}
-	if !c.HealthOK && !c.ServiceActive && c.Port > 0 && portListening(c.Port) {
+	if !c.HealthOK && !c.ServiceActive && c.Port > 0 && c.PortOwner == "" && portListening(c.Port) {
 		c.Warnings = append(c.Warnings, fmt.Sprintf("端口 %d 有程序在监听，但不是 Clawbench", c.Port))
 	}
 	if c.PortSource == "配置文件" && !c.HealthOK {
@@ -544,13 +606,14 @@ func listenerDataDirs(listeners []sysops.Listener) []string {
 
 // listenerDataDir infers the data directory of a listening process. An
 // explicit --data-dir wins; a plain `clawbench` started from a shell or a unit
-// uses $HOME/.clawbench.
+// uses $HOME/.clawbench. Only Clawbench processes count: other services also
+// take --data-dir, and their directory must not become a tenant's data dir.
 func listenerDataDir(l sysops.Listener) string {
-	if dir := dataDirFromCmd(l.Command); dir != "" {
-		return filepath.Clean(dir)
-	}
 	if !isClawbenchCommand(l.Command) {
 		return ""
+	}
+	if dir := dataDirFromCmd(l.Command); dir != "" {
+		return filepath.Clean(dir)
 	}
 	if l.Home != "" {
 		return filepath.Clean(filepath.Join(l.Home, ".clawbench"))
@@ -561,9 +624,20 @@ func listenerDataDir(l sysops.Listener) string {
 	return ""
 }
 
+// isClawbenchCommand reports whether a command line is a Clawbench instance.
+// Instances installed by the platform run from <install_dir>/current/clawbench
+// and the default install dir is called clawbench-fleet, so the executable
+// name has to be checked instead of the whole path.
 func isClawbenchCommand(command string) bool {
 	lower := strings.ToLower(command)
-	return strings.Contains(lower, "clawbench") && !strings.Contains(lower, "clawbench-fleet")
+	if !strings.Contains(lower, "clawbench") {
+		return false
+	}
+	fields := strings.Fields(lower)
+	if len(fields) == 0 {
+		return false
+	}
+	return filepath.Base(fields[0]) != platformName
 }
 
 func dirExists(path string) bool {

@@ -300,6 +300,94 @@ func TestScanPrefersConfigPortOverForwardingPort(t *testing.T) {
 	}
 }
 
+// An old ~/.clawbench directory often stays behind after an instance is moved
+// to another data directory. Its config still holds Clawbench's default port
+// (20000), so trusting it makes the scan report 20000 for a service that is
+// actually running on another port. The running process has to win.
+func TestScanPrefersRunningDataDirOverStaleHome(t *testing.T) {
+	svc, cfg := newTestService(t)
+	ctx := context.Background()
+	stale := freePort(t)
+	seedExistingInstance(t, svc, cfg, "alice", 5001, stale) // ~/.clawbench, not in use
+	live := freePort(t)
+	other := filepath.Join(cfg.DataDir, "srv", "alice")
+	if err := os.MkdirAll(filepath.Join(other, "config"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(other, "config", "config.yaml"), []byte("port: 20000\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	unit := svc.Cfg.UnitName("alice")
+	content := fmt.Sprintf("[Service]\nUser=alice\nExecStart=/opt/clawbench/current/clawbench --port %d --data-dir %s\n", live, other)
+	if err := svc.Sys.WriteUnit(ctx, unit, content); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Sys.Start(ctx, unit); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = svc.Sys.Stop(context.Background(), unit) })
+
+	items, err := svc.ScanAdoptable(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("candidates = %+v", items)
+	}
+	c := items[0]
+	if c.DataDir != other {
+		t.Fatalf("data dir = %q, want the running instance's %q", c.DataDir, other)
+	}
+	if c.Port != live || c.PortSource != "运行中的进程" {
+		t.Fatalf("port = %d (%s), want the live port %d", c.Port, c.PortSource, live)
+	}
+	if !c.HealthOK || c.Status != domain.StatusRunning {
+		t.Fatalf("live instance not detected: %+v", c)
+	}
+}
+
+// A stale config port can be held by a different account's instance. The
+// health check on 127.0.0.1 would succeed, so without checking who owns the
+// socket the scan reports somebody else's service as this user's instance.
+func TestScanDoesNotBorrowAnotherUsersPort(t *testing.T) {
+	svc, cfg := newTestService(t)
+	ctx := context.Background()
+	port := freePort(t)
+	seedExistingInstance(t, svc, cfg, "alice", 5001, port)
+	bobHome := seedExistingInstance(t, svc, cfg, "bob", 5002, port)
+
+	unit := svc.Cfg.UnitName("bob")
+	content := fmt.Sprintf("[Service]\nUser=bob\nExecStart=/opt/clawbench/current/clawbench --port %d --data-dir %s/.clawbench\n", port, bobHome)
+	if err := svc.Sys.WriteUnit(ctx, unit, content); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Sys.Start(ctx, unit); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = svc.Sys.Stop(context.Background(), unit) })
+
+	items, err := svc.ScanAdoptable(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var alice *AdoptCandidate
+	for i := range items {
+		if items[i].Username == "alice" {
+			alice = &items[i]
+		}
+	}
+	if alice == nil {
+		t.Fatalf("alice missing from %+v", items)
+	}
+	if alice.HealthOK || alice.ServiceActive {
+		t.Fatalf("alice must not be marked running on bob's port: %+v", alice)
+	}
+	if alice.PortOwner != "bob" || alice.Blocked == "" {
+		t.Fatalf("port owner = %q blocked = %q", alice.PortOwner, alice.Blocked)
+	}
+}
+
 func TestAdoptTenantsAsyncReportsProgress(t *testing.T) {
 	svc, cfg := newTestService(t)
 	port := freePort(t)

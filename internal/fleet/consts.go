@@ -27,6 +27,10 @@ const (
 	// the new ones in a downloadable file.
 	bulkResetPasswordAction = "reset-password"
 
+	// platformName is the platform's own account and executable name. It is
+	// never a tenant, and a process running it is not a Clawbench instance.
+	platformName = "clawbench-fleet"
+
 	// sampleInterval is how often one usage-history point is written. Frequent
 	// enough to see a spike after the fact, cheap enough to keep for a week.
 	sampleInterval = 5 * time.Minute

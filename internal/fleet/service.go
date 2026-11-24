@@ -178,7 +178,7 @@ var reservedNames = map[string]bool{
 	"uucp": true, "proxy": true, "www-data": true, "backup": true, "list": true,
 	"irc": true, "gnats": true, "nobody": true, "systemd-network": true,
 	"systemd-resolve": true, "messagebus": true, "sshd": true,
-	"clawbench": true, "clawbench-fleet": true,
+	"clawbench": true, platformName: true,
 }
 
 func ValidateUsername(username string) error {

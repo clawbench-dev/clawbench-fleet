@@ -99,7 +99,7 @@ func generateSelfSigned(certPath, keyPath string, hosts []string) error {
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber:          serial,
-		Subject:               pkix.Name{CommonName: "clawbench-fleet", Organization: []string{"Clawbench"}},
+		Subject:               pkix.Name{CommonName: platformName, Organization: []string{"Clawbench"}},
 		NotBefore:             time.Now().Add(-time.Hour),
 		NotAfter:              time.Now().AddDate(10, 0, 0),
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment | x509.KeyUsageCertSign,

@@ -112,6 +112,11 @@ func TestListenerAndConfigHelpers(t *testing.T) {
 	if isClawbenchCommand("clawbench-fleet --dev") {
 		t.Fatal("the platform itself is not an instance")
 	}
+	// Instances installed by the platform live under clawbench-fleet/current;
+	// only the executable name decides whether it is the platform or not.
+	if !isClawbenchCommand("/opt/clawbench-fleet/current/clawbench --port 21000 --data-dir /home/x/.clawbench") {
+		t.Fatal("an instance installed by the platform is still clawbench")
+	}
 	if got := dataDirFromCmd("clawbench --data-dir /srv/a --port 1"); got != "/srv/a" {
 		t.Fatalf("data dir = %q", got)
 	}
@@ -119,6 +124,9 @@ func TestListenerAndConfigHelpers(t *testing.T) {
 		"clawbench --data-dir /srv/a": "/srv/a",
 		"/usr/bin/clawbench":          "/home/x/.clawbench",
 		"python3 server.py":           "",
+		// Other services take --data-dir too; their directory is not a
+		// Clawbench data directory.
+		"python3 app.py --data-dir /srv/b": "",
 	}
 	for cmd, want := range cases {
 		l := sysops.Listener{Username: "alice", Port: 21000, Command: cmd, Home: "/home/x", Cwd: "/tmp"}
