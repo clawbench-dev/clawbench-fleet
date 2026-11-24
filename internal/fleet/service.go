@@ -854,12 +854,25 @@ func (s *Service) HostStats() HostStats {
 			st.Load1, _ = strconv.ParseFloat(fields[0], 64)
 		}
 	}
-	var fs syscall.Statfs_t
-	if err := syscall.Statfs(s.Cfg.DataDir, &fs); err == nil {
-		st.DiskTotal = blocksToBytes(fs.Blocks, fs.Bsize)
-		st.DiskFree = blocksToBytes(fs.Bavail, fs.Bsize)
+	// Measure the disk that backs the tenants' home directories, not the one
+	// holding the fleet's own data: the numbers here describe how much room the
+	// tenants have left. DataDir may live on a different filesystem entirely.
+	// Fall back to the root filesystem when the home root does not exist, so a
+	// slim install never reports zero total space.
+	if st.DiskTotal, st.DiskFree = s.diskOf(s.Cfg.System.HomeRoot); st.DiskTotal == 0 {
+		st.DiskTotal, st.DiskFree = s.diskOf("/")
 	}
 	return st
+}
+
+// diskOf reports the total and available bytes of the filesystem holding path.
+// It returns zeros when path cannot be measured.
+func (s *Service) diskOf(path string) (total, free int64) {
+	var fs syscall.Statfs_t
+	if err := syscall.Statfs(path, &fs); err != nil {
+		return 0, 0
+	}
+	return blocksToBytes(fs.Blocks, fs.Bsize), blocksToBytes(fs.Bavail, fs.Bsize)
 }
 
 func (s *Service) hostCPU() float64 {
