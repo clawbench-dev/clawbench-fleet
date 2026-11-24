@@ -122,3 +122,25 @@ func TestSettingsReportVersion(t *testing.T) {
 		t.Fatalf("settings payload = %+v", got)
 	}
 }
+
+// TestSelfUpgradeEndpoints covers the platform-upgrade entry points. --dev has
+// no installed binary to swap, so the page must be told it is unsupported and
+// the upload must fail loudly instead of pretending the platform changed.
+func TestSelfUpgradeEndpoints(t *testing.T) {
+	c, _ := newTestClient(t)
+	var info struct {
+		Version   string `json:"version"`
+		Binary    string `json:"binary"`
+		Supported bool   `json:"supported"`
+	}
+	if status := c.json(http.MethodGet, "/api/upgrades/self", nil, &info); status != http.StatusOK {
+		t.Fatalf("info = %d", status)
+	}
+	if info.Supported || info.Version == "" || info.Binary == "" {
+		t.Fatalf("info = %+v", info)
+	}
+	status, body := c.upload("/api/upgrades/self", "file", "clawbench-fleet", []byte("#!/bin/sh\nexit 0\n"))
+	if status != http.StatusBadRequest {
+		t.Fatalf("dev upload = %d %s", status, body)
+	}
+}

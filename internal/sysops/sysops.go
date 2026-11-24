@@ -118,6 +118,17 @@ type System interface {
 	// NpmInstall installs pkg@version into prefix, never into the global npm
 	// prefix, so several versions can be kept side by side.
 	NpmInstall(ctx context.Context, prefix, pkg, version, registry string) error
+
+	// CheckupVersion reports the version of the Clawbench binary at path.
+	CheckupVersion(ctx context.Context, path string) (string, error)
+	// ReplaceSelf swaps dst with src atomically enough that dst is either the
+	// old binary or the new one, never missing: the platform keeps running on
+	// the old file until the service manager starts it again.
+	ReplaceSelf(src, dst string) error
+	// RestartSelf restarts the platform's own systemd unit. It issues the
+	// command and returns without waiting for the unit to come back, because
+	// the restarted process is this one.
+	RestartSelf(ctx context.Context) error
 }
 
 // NpmPlatformPackage maps a wrapper package such as "@scope/clawbench" to the

@@ -3,6 +3,7 @@ package sysops
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net"
@@ -42,9 +43,10 @@ type fakeUnit struct {
 }
 
 var (
-	fakePortRe   = regexp.MustCompile(`--port\s+(\d+)`)
-	fakeUserRe   = regexp.MustCompile(`(?m)^User=(\S+)`)
-	fakeClosedRe = regexp.MustCompile(`(?m)^#\s*clawbench-fake: closed\s*$`)
+	fakePortRe    = regexp.MustCompile(`--port\s+(\d+)`)
+	fakeUserRe    = regexp.MustCompile(`(?m)^User=(\S+)`)
+	fakeClosedRe  = regexp.MustCompile(`(?m)^#\s*clawbench-fake: closed\s*$`)
+	fakeVersionRe = regexp.MustCompile(`echo\s+([^\s;]+)`)
 )
 
 func NewFake(baseDir, installDir string) *Fake {
@@ -534,4 +536,39 @@ func (f *Fake) NpmInstall(ctx context.Context, prefix, pkg, version, registry st
 
 func (f *Fake) NpmRegistry(ctx context.Context) (string, error) {
 	return "https://registry.npmjs.org/", nil
+}
+
+// CheckupVersion reads the version from the script the fake installs, so an
+// uploaded dev binary reports the same version the real one would.
+func (f *Fake) CheckupVersion(ctx context.Context, path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	if m := fakeVersionRe.FindStringSubmatch(string(data)); len(m) == 2 {
+		return m[1], nil
+	}
+	return "", errors.New("程序没有输出版本号")
+}
+
+// ReplaceSelf overwrites the dev copy of the platform binary. --dev runs from
+// the build directory, so it uses the same backup-and-swap as production but
+// never restarts anything: the dev server keeps running whatever was started.
+func (f *Fake) ReplaceSelf(src, dst string) error {
+	if err := copySelfFile(src, dst+".bak"); err != nil {
+		return err
+	}
+	return copySelfFile(src, dst)
+}
+
+// RestartSelf is a no-op in dev: there is no unit to restart, and killing the
+// dev server would end the session the operator is working in.
+func (f *Fake) RestartSelf(ctx context.Context) error { return nil }
+
+func copySelfFile(src, dst string) error {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(dst, data, 0o755) //nolint:gosec // the platform binary must be executable
 }
