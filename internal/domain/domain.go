@@ -168,10 +168,18 @@ type Settings struct {
 	// DefaultDiskQuotaGB applies to new tenants; zero means no limit.
 	DefaultDiskQuotaGB int `json:"default_disk_quota_gb"`
 	// MetricsRetention controls how long the usage history is kept.
-	MetricsRetention int    `json:"metrics_retention_days"`
-	BackupEnabled    bool   `json:"backup_enabled"`
-	BackupHour       int    `json:"backup_hour"`
-	BackupRetention  int    `json:"backup_retention_days"`
+	MetricsRetention int  `json:"metrics_retention_days"`
+	BackupEnabled    bool `json:"backup_enabled"`
+	BackupHour       int  `json:"backup_hour"`
+	BackupRetention  int  `json:"backup_retention_days"`
+	// NpmAutoEnabled downloads newly published versions from npm on a
+	// schedule. It only fills the local version library: nothing is installed
+	// onto an instance until an operator pilots or applies the upgrade.
+	NpmAutoEnabled bool `json:"npm_auto_enabled"`
+	// NpmAutoWeekly runs the check once a week instead of every day.
+	NpmAutoWeekly bool `json:"npm_auto_weekly"`
+	// NpmAutoHour is the hour of the day (0-23) the check runs at.
+	NpmAutoHour      int    `json:"npm_auto_hour"`
 	TrashRetention   int    `json:"trash_retention_days"`
 	AuditRetention   int    `json:"audit_retention_days"`
 	AllowPortForward bool   `json:"allow_port_forward"`

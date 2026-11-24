@@ -3,6 +3,8 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { AlertTriangle, ArrowUpCircle, Download, Play, RotateCcw, UploadCloud } from 'lucide-vue-next'
 import { api, errorMessage } from '../api'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
+import EmptyState from '../components/EmptyState.vue'
+import LoadingState from '../components/LoadingState.vue'
 import { toast } from '../stores/toast'
 import type { Job, NpmVersion, Tenant, Version } from '../types'
 import { formatBytes, formatTime, shortSha } from '../utils'
@@ -334,6 +336,7 @@ function statusText(v: Version): string {
           </div>
           <div class="small mono muted-2" style="margin-top: 2px">SHA-256 {{ shortSha(current.sha256) }}</div>
         </div>
+        <div v-else-if="loading" class="empty" style="padding: 18px">正在读取版本信息…</div>
         <div v-else class="empty" style="padding: 18px">还没有当前版本，先从 npm 安装或上传一个 Clawbench 二进制。</div>
         <div class="form-actions" style="justify-content: flex-start">
           <button class="btn" type="button" :disabled="!current" @click="confirmRollback = true">
@@ -370,7 +373,8 @@ function statusText(v: Version): string {
             </option>
           </select>
         </div>
-        <div v-else-if="!npmLoading && !npmWarning" class="empty" style="padding: 14px">npm 上没有查到可用版本。</div>
+        <div v-else-if="npmLoading" class="empty" style="padding: 14px">正在查询 npm 上的版本…</div>
+        <div v-else-if="!npmWarning" class="empty" style="padding: 14px">npm 上没有查到可用版本。</div>
         <div class="form-actions" style="justify-content: flex-start">
           <button
             class="btn btn-primary"
@@ -427,7 +431,10 @@ function statusText(v: Version): string {
           </tbody>
         </table>
       </div>
-      <div v-else class="empty" style="padding: 22px">还没有上传任何版本。</div>
+      <div v-else-if="loading">
+        <LoadingState text="正在读取已安装版本…" />
+      </div>
+      <EmptyState v-else title="还没有上传任何版本" hint="从上面「从 npm 安装」或下面的「离线安装」来装第一个版本。" />
     </div>
 
     <div class="card" style="margin-top: 16px">
@@ -550,6 +557,7 @@ function statusText(v: Version): string {
           </tbody>
         </table>
       </div>
+      <div v-else class="small muted-2">正在准备这个任务，稍等一下…</div>
     </div>
 
     <div class="card" style="margin-top: 16px; border-color: rgba(245,185,76,.3)">

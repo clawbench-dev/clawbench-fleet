@@ -228,6 +228,7 @@ function downloadSample() {
           </tbody>
         </table>
       </div>
+      <div v-else class="small muted-2">正在准备这个任务，稍等一下…</div>
 
       <div v-if="jobDone" class="row-between" style="margin-top: 14px; flex-wrap: wrap">
         <div class="small muted-2">成功清单里有明文密码，下载后请尽快发给员工并删除文件。</div>

@@ -18,6 +18,7 @@ import {
 import { downloadFile } from '../api'
 import { api, errorMessage } from '../api'
 import EmptyState from '../components/EmptyState.vue'
+import LoadingState from '../components/LoadingState.vue'
 import Modal from '../components/Modal.vue'
 import TenantTable from '../components/TenantTable.vue'
 import { toast } from '../stores/toast'
@@ -472,7 +473,7 @@ function scanStatus(c: AdoptCandidate) {
     </Modal>
 
     <TenantTable
-      v-if="items.length"
+      v-if="items.length || !loading"
       :items="items"
       admin
       :selected="selected"
@@ -505,7 +506,11 @@ function scanStatus(c: AdoptCandidate) {
       </template>
     </TenantTable>
 
-    <div v-else-if="!loading" style="margin-top: 12px">
+    <div v-else-if="loading" style="margin-top: 12px">
+      <LoadingState text="正在读取租户列表…" />
+    </div>
+
+    <div v-else style="margin-top: 12px">
       <EmptyState title="没有找到租户" hint="换个搜索词，或者创建第一个实例。">
         <router-link class="btn btn-primary" to="/tenants/new"><Plus :size="15" /> 新建租户</router-link>
       </EmptyState>

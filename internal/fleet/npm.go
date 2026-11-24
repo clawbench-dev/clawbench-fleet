@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"clawbench-fleet/internal/domain"
@@ -90,6 +91,11 @@ func (s *Service) NpmCatalog(ctx context.Context) NpmCatalog {
 	return out
 }
 
+// npmUpgradeMu serializes downloads. Two npm installs at once would fight over
+// the upload directory, and a scheduled pull racing a manual one would make the
+// second one fail with a confusing "already installed".
+var npmUpgradeMu sync.Mutex
+
 // InstallFromNpm downloads one version into a throwaway directory and copies
 // only the executable into the versions directory, so it ends up exactly where
 // an uploaded binary would. The old version stays untouched and rollback keeps
@@ -99,6 +105,13 @@ func (s *Service) InstallFromNpm(ctx context.Context, version string, ac AuditCo
 	if !versionRe.MatchString(version) {
 		return nil, errors.New("版本号格式不对")
 	}
+	npmUpgradeMu.Lock()
+	defer npmUpgradeMu.Unlock()
+
+	return s.installFromNpmLocked(ctx, version, ac)
+}
+
+func (s *Service) installFromNpmLocked(ctx context.Context, version string, ac AuditContext) (*domain.Version, error) {
 	pkg := s.Cfg.Clawbench.NpmPackage
 
 	prefix := filepath.Join(s.Cfg.UploadDir(), fmt.Sprintf("npm-%s-%d", version, time.Now().UnixNano()))
@@ -162,6 +175,93 @@ func (s *Service) InstallFromNpm(ctx context.Context, version string, ac AuditCo
 		fieldVersion: label, "npm_package": pkg, "npm_version": version, "sha256": sum,
 	}, nil)
 	return v, nil
+}
+
+// NpmAutoResult is what one scheduled check did, for the audit log and tests.
+type NpmAutoResult struct {
+	// Installed lists the versions that were downloaded and added to the
+	// version library during this run.
+	Installed []string
+	// Current is the newest published version, whether or not it was new here.
+	Current string
+}
+
+// publishedVersions asks npm what exists and returns the newest version as
+// well as the ones this machine should download.
+func (s *Service) publishedVersions(ctx context.Context) (latest string, missing []string, err error) {
+	catalog := s.NpmCatalog(ctx)
+	if catalog.Warning != "" {
+		return "", nil, errors.New(catalog.Warning)
+	}
+	for _, v := range catalog.Versions {
+		if latest == "" || compareVersions(v.Version, latest) > 0 {
+			latest = v.Version
+		}
+	}
+	if latest == "" {
+		return "", nil, errors.New("npm 上没有找到可用的版本")
+	}
+	// "Older than what is already here" is the interesting case: after a
+	// rollback the library holds a newer build than the one running, and
+	// pulling old versions back in would only clutter the page.
+	newestLocal := ""
+	if versions, listErr := s.Store.ListVersions(); listErr == nil {
+		for _, v := range versions {
+			if newestLocal == "" || compareVersions(v.Version, newestLocal) > 0 {
+				newestLocal = v.Version
+			}
+		}
+	}
+	for _, v := range catalog.Versions {
+		if v.Installed {
+			continue
+		}
+		if newestLocal != "" && compareVersions(v.Version, newestLocal) < 0 {
+			continue
+		}
+		missing = append(missing, v.Version)
+	}
+	return latest, missing, nil
+}
+
+// RunNpmAutoCheck downloads every published version this machine does not have
+// yet, skipping the ones that are older than what it already has. It never
+// touches a tenant: the versions land in the version library and wait for an
+// operator to pilot or apply them.
+//
+// Existing instances keep running, so the only cost of installing too much is a
+// few megabytes of disk. Downloading everything (rather than only the newest)
+// means an operator who skipped a week can still pilot an intermediate version.
+func (s *Service) RunNpmAutoCheck(ctx context.Context, ac AuditContext) (NpmAutoResult, error) {
+	out := NpmAutoResult{Installed: []string{}}
+	latest, missing, err := s.publishedVersions(ctx)
+	out.Current = latest
+	if err != nil {
+		return out, err
+	}
+
+	var failures []string
+	for _, version := range missing {
+		if _, installErr := s.InstallFromNpm(ctx, version, ac); installErr != nil {
+			failures = append(failures, fmt.Sprintf("%s：%v", version, installErr))
+			continue
+		}
+		out.Installed = append(out.Installed, version)
+	}
+	if len(failures) > 0 {
+		return out, fmt.Errorf("有 %d 个版本没装成功：%s", len(failures), strings.Join(failures, "；"))
+	}
+	return out, nil
+}
+
+// npmAutoDue reports whether the scheduled check has already run today. The
+// weekly mode additionally requires the configured weekday, which keeps the
+// check from firing again on every following day of that week.
+func (s *Service) npmAutoDue(st domain.Settings, now time.Time) bool {
+	if st.NpmAutoWeekly && now.Weekday() != npmWeeklyDay {
+		return false
+	}
+	return s.shouldRun(npmDailyKey, st.NpmAutoHour)
 }
 
 // locateNpmBinary finds the executable inside an installed npm tree. The

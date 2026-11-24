@@ -34,4 +34,14 @@ const (
 	// sampleInterval is how often one usage-history point is written. Frequent
 	// enough to see a spike after the fact, cheap enough to keep for a week.
 	sampleInterval = 5 * time.Minute
+
+	// npmDailyKey is the dailyLoop bookkeeping key of the scheduled npm check.
+	npmDailyKey = "npm"
+	// npmWeeklyDay is the weekday the weekly schedule runs on. Sunday is a
+	// quiet day, and the check only fills the version library, so it cannot
+	// disturb anyone working in an instance.
+	npmWeeklyDay = time.Sunday
+	// npmAutoTimeout bounds one scheduled check. Downloading a release over a
+	// slow link is the slowest step and npm has no timeout of its own.
+	npmAutoTimeout = 30 * time.Minute
 )

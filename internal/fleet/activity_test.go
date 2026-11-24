@@ -27,9 +27,6 @@ func newInstanceDB(t *testing.T, dataDir string, historyTimes ...string) string 
 	stmts := []string{
 		`CREATE TABLE chat_history (id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER NOT NULL DEFAULT 0,
 			role TEXT NOT NULL, content TEXT NOT NULL, session_id TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)`,
-		`CREATE TABLE chat_tool_calls (id INTEGER PRIMARY KEY AUTOINCREMENT, message_id INTEGER NOT NULL,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP)`,
-		`CREATE TABLE chat_metadata (message_id INTEGER PRIMARY KEY, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)`,
 		`CREATE TABLE chat_sessions (id TEXT PRIMARY KEY, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP, removed INTEGER NOT NULL DEFAULT 0)`,
 	}
 	for _, stmt := range stmts {
@@ -93,7 +90,7 @@ func TestRefreshLastActiveReadsInstanceDatabase(t *testing.T) {
 	}
 }
 
-func TestRefreshLastActiveFallsBackToOtherTables(t *testing.T) {
+func TestRefreshLastActiveIgnoresSessionUpdates(t *testing.T) {
 	svc, cfg := newTestService(t)
 	ctx := context.Background()
 
@@ -105,22 +102,28 @@ func TestRefreshLastActiveFallsBackToOtherTables(t *testing.T) {
 	if err := svc.Store.CreateTenant(tenant); err != nil {
 		t.Fatal(err)
 	}
-	// No chat messages at all, but a session was touched: that still counts as
-	// the employee having been in there.
-	dbPath := newInstanceDB(t, tenant.DataDir)
+	// The newest session is archived, which is later than any message. Only the
+	// message time counts, so the archived session must not win.
+	dbPath := newInstanceDB(t, tenant.DataDir, "2026-11-10 10:00:00")
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`INSERT INTO chat_sessions(id, updated_at) VALUES('s1','2026-11-20 10:00:00')`); err != nil {
-		t.Fatal(err)
+	stmts := []string{
+		`INSERT INTO chat_sessions(id, updated_at, removed) VALUES('live','2026-11-10 10:00:00',0)`,
+		`INSERT INTO chat_sessions(id, updated_at, removed) VALUES('archived','2026-12-01 09:00:00',1)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
 	}
 	_ = db.Close()
 
 	svc.RefreshLastActive(ctx)
 
 	fresh, _ := svc.Store.GetTenant(tenant.ID)
-	want := time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC).Format(time.RFC3339)
+	want := time.Date(2026, 11, 10, 10, 0, 0, 0, time.UTC).Format(time.RFC3339)
 	if fresh.LastActiveAt != want {
 		t.Fatalf("last_active_at = %q, want %q", fresh.LastActiveAt, want)
 	}
