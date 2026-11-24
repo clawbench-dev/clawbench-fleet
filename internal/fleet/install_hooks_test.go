@@ -31,9 +31,7 @@ func TestInstallHooksResolvesCheckoutAtRunTime(t *testing.T) {
 	// A separate git repo stands in for a worktree: it has its own .git/hooks,
 	// exactly like a real one.
 	dir := t.TempDir()
-	if out, runErr := exec.Command("git", "-C", dir, "init", "--quiet").CombinedOutput(); runErr != nil {
-		t.Fatalf("git init: %v %s", runErr, out)
-	}
+	initRepo(t, dir)
 	// The script resolves the repo from its own location, so copy it into a
 	// scripts/ directory inside the throwaway repo.
 	if err := os.MkdirAll(filepath.Join(dir, "scripts"), 0o755); err != nil {
@@ -73,9 +71,7 @@ func TestInstallHooksMakesThemExecutable(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	if out, runErr := exec.Command("git", "-C", dir, "init", "--quiet").CombinedOutput(); runErr != nil {
-		t.Fatalf("git init: %v %s", runErr, out)
-	}
+	initRepo(t, dir)
 	if err := os.MkdirAll(filepath.Join(dir, "scripts"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -105,9 +101,7 @@ func TestInstallHooksMakesThemExecutable(t *testing.T) {
 // This drives the same assertion against a pre-fix script built here.
 func TestInstallHooksCheckRejectsABakedPath(t *testing.T) {
 	dir := t.TempDir()
-	if out, err := exec.Command("git", "-C", dir, "init", "--quiet").CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v %s", err, out)
-	}
+	initRepo(t, dir)
 	// Exactly what the script wrote before the fix.
 	baked := "#!/bin/sh\n# Pre-push hook\ncd \"" + dir + "\" || exit 1\nexec ./scripts/pre-push-checks.sh\n"
 	hook := filepath.Join(dir, ".git", "hooks", "pre-push")
@@ -138,4 +132,34 @@ func inspectHook(t *testing.T, hook, repo string) []string {
 		failures = append(failures, "does not resolve the checkout at run time")
 	}
 	return failures
+}
+
+// initRepo initializes a git repo at dir for the tests above. GIT_* variables
+// inherited from git (GIT_DIR while committing, GIT_PREFIX from a hook) would
+// redirect a plain `git init` at the parent repository, so they are dropped:
+// without this the fixture lands in the wrong place and only fails when the
+// suite runs from inside a git command, which is exactly what CI and the
+// pre-push hook do.
+func initRepo(t *testing.T, dir string) {
+	t.Helper()
+	cmd := exec.Command("git", "-C", dir, "init", "--quiet")
+	cmd.Env = cleanGitEnv()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v %s", err, out)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
+		t.Fatalf("git init did not create %s/.git: %v", dir, err)
+	}
+}
+
+// cleanGitEnv is os.Environ minus every GIT_* variable.
+func cleanGitEnv() []string {
+	out := make([]string, 0, len(os.Environ()))
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "GIT_") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
 }
