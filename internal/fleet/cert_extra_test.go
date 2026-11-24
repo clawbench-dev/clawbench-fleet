@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"clawbench-fleet/internal/domain"
@@ -168,5 +169,32 @@ func TestEnsureCertificateReportsAnUnwritableDirectory(t *testing.T) {
 	}
 	if _, err := svc.EnsureCertificate(); err == nil {
 		t.Fatal("an unwritable certificate directory should be reported")
+	}
+}
+
+// TestDistributeCertReportsAnUnusableTenantDirectory covers the case where the
+// per-tenant certificate directory cannot be created. The push has to fail with
+// a message naming the directory: silently leaving the instance without a
+// certificate would make it refuse to start once HTTPS is on.
+func TestDistributeCertReportsAnUnusableTenantDirectory(t *testing.T) {
+	svc, _ := newTestService(t)
+	if !svc.Settings().TLSEnabled {
+		t.Skip("TLS is off in this fixture")
+	}
+	tenant := &domain.Tenant{Username: "blocked", DataDir: t.TempDir()}
+
+	// A regular file where the cert directory should go makes MkdirAll fail.
+	if err := os.MkdirAll(filepath.Dir(tenantCertDir(tenant)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tenantCertDir(tenant), []byte("not a dir"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := svc.distributeCert(tenant)
+	if err == nil {
+		t.Fatal("a blocked cert directory must be reported")
+	}
+	if !strings.Contains(err.Error(), tenantCertDir(tenant)) {
+		t.Fatalf("error should name the directory, got %v", err)
 	}
 }

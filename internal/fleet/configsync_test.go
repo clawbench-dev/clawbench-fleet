@@ -2,7 +2,9 @@ package fleet
 
 import (
 	"context"
+	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -152,5 +154,102 @@ func TestApplyTenantConfigMarksPartialWhenOneInstanceFails(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), "page_size: 7") {
 		t.Fatalf("healthy instance kept the old config:\n%s", raw)
+	}
+}
+
+// TestQuotaAndConfigPushSkipTenantsThatChangedMidFlight covers the race the
+// per-tenant guard exists for: a tenant enters the trash (or starts being
+// deleted) after the job was created but before its turn came. That instance
+// must be skipped, not resurrected.
+func TestQuotaAndConfigPushSkipTenantsThatChangedMidFlight(t *testing.T) {
+	svc := newService(t)
+	ctx := context.Background()
+	ac := AuditContext{Actor: "tester"}
+	tenant := createRunning(t, svc, "alice")
+
+	// Both per-instance entry points share the same guard, so one tenant in
+	// the trash is enough to cover both.
+	if _, err := svc.DeleteTenant(ctx, tenant.ID, "alice", ac); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.ApplyTenantConfigTo(ctx, tenant.ID, ac); err == nil {
+		t.Fatal("a config push must skip a trashed tenant")
+	}
+	st := svc.Settings()
+	if err := svc.applyQuotaToTenant(ctx, tenant.ID, st, ac); err == nil {
+		t.Fatal("a quota push must skip a trashed tenant")
+	}
+}
+
+// TestQuotaPushLeavesMatchingTenantsAlone makes sure the default-quota push is
+// a no-op for an instance that already runs with the defaults: restarting
+// every instance on every click would be a needless outage.
+func TestQuotaPushLeavesMatchingTenantsAlone(t *testing.T) {
+	svc := newService(t)
+	ctx := context.Background()
+	ac := AuditContext{Actor: "tester"}
+	tenant := createRunning(t, svc, "bob")
+
+	if err := svc.applyQuotaToTenant(ctx, tenant.ID, svc.Settings(), ac); err != nil {
+		t.Fatalf("an instance already at the defaults should be left alone: %v", err)
+	}
+	got, err := svc.GetTenant(tenant.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != domain.StatusRunning {
+		t.Fatalf("status = %s, want the instance left running", got.Status)
+	}
+}
+
+// TestConfigFilePathPrefersTheConfiguredValue pins the file the adopt service
+// unit will name. Getting it wrong hands systemd a unit pointing at the wrong
+// config, and the platform does not come back after the restart.
+func TestConfigFilePathPrefersTheConfiguredValue(t *testing.T) {
+	svc := newService(t)
+	if got := svc.configFilePath(); got != SelfConfigPath {
+		t.Fatalf("default config path = %q, want %q", got, SelfConfigPath)
+	}
+	svc.ConfigPath = "/tmp/custom-config.yaml"
+	if got := svc.configFilePath(); got != "/tmp/custom-config.yaml" {
+		t.Fatalf("configured path = %q", got)
+	}
+}
+
+// TestAdoptJobFailsCleanlyWhenTheHostCannotBeScanned covers a background job
+// whose very first step fails. Every item must be marked failed and the job
+// itself closed, otherwise the page shows a progress bar that never finishes.
+func TestAdoptJobFailsCleanlyWhenTheHostCannotBeScanned(t *testing.T) {
+	svc := newService(t)
+	svc.Sys = hookSystem{listUsersErr: errors.New("扫描失败")}.with(svc.Sys)
+
+	job, err := svc.AdoptTenantsAsync(context.Background(), []string{"alice", "bob"}, AuditContext{Actor: "tester"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitJob(t, svc, job.ID, domain.JobFailed)
+}
+
+// TestValidateTLSRejectsRelativeCertDir protects the one setting that has to be
+// absolute: a relative certificate directory is resolved against whatever the
+// service manager happens to use as a working directory, so the pair lands
+// somewhere nobody looks and every instance fails to start.
+func TestValidateTLSRejectsRelativeCertDir(t *testing.T) {
+	svc := newService(t)
+	st := svc.Settings()
+	st.TLSEnabled = true
+	st.TLSCertDir = "certs"
+	if err := validateTLS(st); err == nil {
+		t.Fatal("a relative certificate directory must be rejected")
+	}
+	st.TLSCertDir = filepath.Join(t.TempDir(), "certs")
+	if err := validateTLS(st); err != nil {
+		t.Fatalf("an absolute certificate directory should be accepted: %v", err)
+	}
+	// With HTTPS off the directory is not used at all, so it is not checked.
+	st.TLSEnabled = false
+	st.TLSCertDir = "certs"
+	if err := validateTLS(st); err != nil {
+		t.Fatalf("the check must not fire while HTTPS is off: %v", err)
 	}
 }

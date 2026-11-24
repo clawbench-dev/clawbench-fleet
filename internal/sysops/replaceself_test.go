@@ -102,3 +102,78 @@ func TestReplaceSelfCopiesIntoAMissingDestination(t *testing.T) {
 		t.Fatalf("installed binary mode = %v, want executable", info.Mode())
 	}
 }
+
+// TestReplaceSelfFailsOnAReadOnlyDirectory covers the production accident the
+// staging block exists for: the install directory is not writable (a stricter
+// mount, a chmod gone wrong). The swap must fail loudly and leave the running
+// binary untouched, because a half-replaced program cannot restart.
+func TestReplaceSelfFailsOnAReadOnlyDirectory(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions, so this cannot be simulated")
+	}
+	dir := t.TempDir()
+	dst := filepath.Join(dir, "clawbench-fleet")
+	old := []byte("old-binary")
+	if err := os.WriteFile(dst, old, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The source lives elsewhere, so rename fails and the copy branch has to
+	// stage its temporary file next to dst — which is what the read-only
+	// directory blocks.
+	src := filepath.Join(t.TempDir(), "upload")
+	if err := os.WriteFile(src, []byte("new-binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	if err := (&Real{}).ReplaceSelf(src, dst); err == nil {
+		t.Fatal("a read-only install directory must be reported")
+	}
+	_ = os.Chmod(dir, 0o700)
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("the old binary must still be there: %v", err)
+	}
+	if !bytes.Equal(got, old) {
+		t.Fatalf("the old binary was damaged: %q", got)
+	}
+}
+
+// TestReplaceSelfCleansUpWhenTheCopyFails covers the middle of the staging
+// block: the temporary file is created, then the copy fails. The temporary must
+// be removed and the running binary left alone, or a bad upload would slowly
+// fill the install directory with debris.
+func TestReplaceSelfCleansUpWhenTheCopyFails(t *testing.T) {
+	dir := t.TempDir()
+	dst := filepath.Join(dir, "clawbench-fleet")
+	old := []byte("old")
+	if err := os.WriteFile(dst, old, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A directory opens fine from the caller's side and only fails when the
+	// bytes are actually copied, which is exactly the branch worth covering.
+	src := filepath.Join(t.TempDir(), "not-a-file")
+	if err := os.MkdirAll(src, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := (&Real{}).ReplaceSelf(src, dst); err == nil {
+		t.Fatal("copying a directory should fail")
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil || !bytes.Equal(got, old) {
+		t.Fatalf("the old binary must survive: %q %v", got, err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry.Name() != "clawbench-fleet" {
+			t.Fatalf("a failed copy left %q behind", entry.Name())
+		}
+	}
+}

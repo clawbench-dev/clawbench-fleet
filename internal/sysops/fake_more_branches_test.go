@@ -229,3 +229,48 @@ func TestFakeCreateUserFailsWhenHomeCannotBeMade(t *testing.T) {
 		t.Fatal("creating a user without a writable home should fail")
 	}
 }
+
+// TestFakeRestartRequiresAUnit covers the failure half of Restart: restarting
+// a unit that was never written has to report an error rather than pretend the
+// instance came back.
+func TestFakeRestartRequiresAUnit(t *testing.T) {
+	f := NewFake(t.TempDir(), t.TempDir())
+	ctx := context.Background()
+	if err := f.Restart(ctx, "clawbench-missing.service"); err == nil {
+		t.Fatal("restarting an unknown unit should fail")
+	}
+}
+
+// TestFakeKillProcessSparesItself is the guard that keeps the dev session
+// alive: the only process a fake could be asked to kill is the dev server.
+func TestFakeKillProcessSparesItself(t *testing.T) {
+	f := NewFake(t.TempDir(), t.TempDir())
+	if err := f.KillProcess(context.Background(), os.Getpid()); err == nil {
+		t.Fatal("the running process must be refused")
+	}
+	if err := f.KillProcess(context.Background(), 999999); err != nil {
+		t.Fatalf("an unrelated pid should be accepted: %v", err)
+	}
+}
+
+// TestCopySelfFileReportsAMissingSource keeps a failed upgrade honest: the
+// caller has to see an error instead of a silently empty binary.
+func TestCopySelfFileReportsAMissingSource(t *testing.T) {
+	if err := copySelfFile(filepath.Join(t.TempDir(), "nope"), filepath.Join(t.TempDir(), "out")); err == nil {
+		t.Fatal("copying a missing source should fail")
+	}
+}
+
+// TestFakeCheckupVersionRejectsAProgramWithoutAVersion covers the upload that
+// runs but never prints a version: it has to be refused before anything is
+// swapped, or the platform would lose its version to an unreadable binary.
+func TestFakeCheckupVersionRejectsAProgramWithoutAVersion(t *testing.T) {
+	f := NewFake(t.TempDir(), t.TempDir())
+	path := filepath.Join(t.TempDir(), "upload")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.CheckupVersion(context.Background(), path); err == nil {
+		t.Fatal("a program that prints no version must be rejected")
+	}
+}
