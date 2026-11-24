@@ -149,3 +149,22 @@ func TestSelfUpgradeEndpoints(t *testing.T) {
 		t.Fatalf("dev adopt = %d %s", status, body)
 	}
 }
+
+// TestSelfUpgradeRejectsIncompleteUploads covers the two ways the upload form
+// can arrive malformed. Both must come back as a 400 the page can show, not a
+// 500 or a hung request.
+func TestSelfUpgradeRejectsIncompleteUploads(t *testing.T) {
+	c, _ := newTestClient(t)
+
+	// A multipart body with the wrong field name is what a stale frontend or a
+	// hand-rolled curl sends: the form parses, but there is no "file" part.
+	if status, body := c.upload("/api/upgrades/self", "upload", "clawbench-fleet", []byte("x")); status != http.StatusBadRequest {
+		t.Fatalf("wrong field name = %d %s", status, body)
+	}
+
+	// A body that is not multipart at all fails while parsing the form.
+	status, body := c.request(http.MethodPost, "/api/upgrades/self", map[string]string{"file": "not-a-file"})
+	if status != http.StatusBadRequest {
+		t.Fatalf("non-multipart upload = %d %s", status, body)
+	}
+}

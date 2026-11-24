@@ -453,3 +453,24 @@ func TestRestoreTenantFailsWhenSSHSetupFails(t *testing.T) {
 		t.Fatal("restore should fail when SSH setup fails")
 	}
 }
+
+// TestSetTenantSSHRejectsHalfBuiltTenant covers the window where a tenant row
+// exists but the account is still being created (or torn down). Changing SSH
+// then would race useradd/usermod, so the call has to be refused.
+func TestSetTenantSSHRejectsHalfBuiltTenant(t *testing.T) {
+	svc, _ := newSSHTestService(t)
+	ctx := context.Background()
+	tenant, _, err := svc.CreateTenant(ctx, CreateTenantInput{Username: "frank"}, AuditContext{})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	for _, status := range []string{domain.StatusCreating, domain.StatusDeleting} {
+		tenant.Status = status
+		if err := svc.Store.UpdateTenant(tenant); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, sshErr := svc.SetTenantSSH(ctx, tenant.ID, false, AuditContext{}); sshErr == nil {
+			t.Fatalf("changing SSH while %s must be refused", status)
+		}
+	}
+}

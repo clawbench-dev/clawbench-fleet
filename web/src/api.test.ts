@@ -43,12 +43,15 @@ describe('api', () => {
     mockFetch(() => json({ ok: true }, 201))
     await api.post('/tenants', { username: 'alice' })
     await api.patch('/tenants/1', { notes: 'x' })
+    await api.put('/settings/tenant-config', { entries: [] })
     await api.del('/tenants/1', { confirm: 'alice' })
-    const [post, patch, del] = calls
+    const [post, patch, put, del] = calls
     expect(post.init.method).toBe('POST')
     expect(post.init.body).toBe(JSON.stringify({ username: 'alice' }))
     expect((post.init.headers as Record<string, string>)['Content-Type']).toBe('application/json')
     expect(patch.init.method).toBe('PATCH')
+    expect(put.init.method).toBe('PUT')
+    expect(put.init.body).toBe(JSON.stringify({ entries: [] }))
     expect(del.init.method).toBe('DELETE')
   })
 

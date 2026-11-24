@@ -57,7 +57,6 @@ func TestCheckupVersionRunsAnExtensionlessBinary(t *testing.T) {
 	_, err = (&Real{}).CheckupVersion(context.Background(), upload)
 	var cmdErr *CommandError
 	refused := errors.As(err, &cmdErr) && strings.TrimSpace(cmdErr.Stderr) == ""
-	t.Logf("DBG refused=%v err=%v", refused, err)
 	if refused {
 		t.Fatal("an extensionless binary must be run, not refused")
 	}
