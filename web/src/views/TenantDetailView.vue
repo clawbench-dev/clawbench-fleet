@@ -59,7 +59,8 @@ const sshCommand = computed(() => {
   return `ssh${portPart} ${tenant.value.username}@${ssh.value.host}`
 })
 
-const quota = ref({ cpu_quota: '', memory_max: '', tasks_max: 0, disk_quota_gb: 0 })
+const emptyQuota = () => ({ cpu_quota: '', memory_max: '', tasks_max: 0, disk_quota_gb: 0 })
+const quota = ref(emptyQuota())
 const usageWindow = ref<'24h' | '7d'>('24h')
 const usage = ref<MetricSample[]>([])
 const usageLoading = ref(false)
@@ -92,18 +93,29 @@ const profileError = ref('')
 
 let timer = 0
 
+// fillQuota copies the saved limits into the form. It runs on every load,
+// including the 5-second silent poll, so the values the server holds are what
+// the operator sees after a reload. Anything typed into the form but not saved
+// yet stays untouched — see quotaDirty.
+function fillQuota(t: Tenant) {
+  quota.value = {
+    cpu_quota: t.cpu_quota,
+    memory_max: t.memory_max,
+    tasks_max: t.tasks_max,
+    disk_quota_gb: t.disk_quota_gb,
+  }
+}
+
 async function load(silent = false) {
   if (!silent) loading.value = true
   try {
     const res = await api.get<{ tenant: Tenant; backups: Backup[] }>(`/tenants/${id.value}`)
     tenant.value = res.tenant
     backups.value = res.backups || []
-    quota.value = {
-      cpu_quota: res.tenant.cpu_quota,
-      memory_max: res.tenant.memory_max,
-      tasks_max: res.tenant.tasks_max,
-      disk_quota_gb: res.tenant.disk_quota_gb,
-    }
+    // The poll below replaces the whole tenant record every few seconds. The
+    // limits have their own edit form, so it gets its own copy and is only
+    // overwritten when the admin is not in the middle of editing it.
+    if (!quotaDirty.value) fillQuota(res.tenant)
     error.value = ''
   } catch (e) {
     error.value = errorMessage(e, '加载失败')
@@ -264,6 +276,10 @@ async function saveQuota() {
   try {
     const res = await api.patch<{ tenant: Tenant }>(`/tenants/${id.value}`, quota.value)
     tenant.value = res.tenant
+    // The server already answered with the saved record; this one is not
+    // silent so a poll that is in flight cannot land afterwards and undo it.
+    fillQuota(res.tenant)
+    quotaDirty.value = false
     toast('资源上限已保存，实例已重启', 'success')
   } catch (e) {
     toast(errorMessage(e, '保存失败'), 'error')
@@ -272,6 +288,21 @@ async function saveQuota() {
     load(true)
   }
 }
+
+const quotaDirty = ref(false)
+watch(
+  quota,
+  (v) => {
+    const t = tenant.value
+    if (!t) return
+    quotaDirty.value =
+      v.cpu_quota !== t.cpu_quota ||
+      v.memory_max !== t.memory_max ||
+      v.tasks_max !== t.tasks_max ||
+      v.disk_quota_gb !== t.disk_quota_gb
+  },
+  { deep: true },
+)
 
 function openPortEdit() {
   portDraft.value = tenant.value?.port || 0
