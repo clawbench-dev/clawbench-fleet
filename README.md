@@ -198,12 +198,21 @@ git tag v0.1.0 && git push origin v0.1.0
 
 | 段落 | 做什么 | 失败的影响 |
 |---|---|---|
-| 第一段：GitHub Release | 编译两个架构、打包、把三个压缩包挂到 Release 页面 | 整条流水线失败 |
-| 第二段：npm | 把同样的三个包发布到 npm | **不影响流水线结论**，第一段发的东西照样能下载 |
+| 第一段：GitHub Release | 编译两个架构，把两个原始可执行文件挂到 Release 页面 | 整条流水线失败 |
+| 第二段：npm | 把三个包（主包 + 两个平台包）发布到 npm | **不影响流水线结论**，第一段发的东西照样能下载 |
 
-这样 npm 那边出问题（账号被锁、包名冲突、网络不通）时，版本仍然算发出来了：用户可以去 Release 页面下载压缩包，用 `sudo ./deploy/install.sh --binary <下好的文件>` 安装。
+Release 页面只提供两个下载就能用的文件，文件名写明架构：
 
-发布三个包：`@xulongzhe/clawbench-fleet`（主包，只有启动脚本，约 2 KB）加
+| 文件 | 用在哪 |
+|---|---|
+| `clawbench-fleet-linux-x64` | 普通 Intel / AMD 服务器 |
+| `clawbench-fleet-linux-arm64` | ARM 服务器 |
+
+下载后 `chmod +x`，再用 `sudo ./deploy/install.sh --binary <文件>` 安装。
+
+这样 npm 那边出问题（账号被锁、包名冲突、网络不通）时，版本仍然算发出来了，用户走 Release 页面这条路照样能装。
+
+npm 上是三个包：`@xulongzhe/clawbench-fleet`（主包，只有启动脚本，约 2 KB）加
 `-linux-x64` / `-linux-arm64` 两个平台包（各约 5 MB，真正能跑的程序在里面）。
 用户只装主包，npm 按当前机器的系统架构自动挑平台包。
 

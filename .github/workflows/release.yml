@@ -104,10 +104,22 @@ jobs:
       - name: Pack tarball
         run: npm pack --silent --pack-destination dist/npm "dist/npm/${{ matrix.target }}"
 
+      # The Release page hands out this tarball's binary directly, so keep a
+      # copy named after the architecture next to the packages the npm stage
+      # consumes.
+      - name: Stage bare binary for the release page
+        run: |
+          set -euo pipefail
+          mkdir -p dist/release
+          install -m 0755 "dist/npm/${{ matrix.target }}/bin/clawbench-fleet" \
+            "dist/release/clawbench-fleet-${{ matrix.target }}"
+
       - uses: actions/upload-artifact@v4
         with:
           name: npm-${{ matrix.target }}
-          path: dist/npm/*.tgz
+          path: |
+            dist/npm/*.tgz
+            dist/release/*
           retention-days: 1
 
   # 第一段：发布到 GitHub Release。流水线的成功与否只看这一段和前面的构建。
@@ -125,26 +137,21 @@ jobs:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Download platform tarballs
+      - name: Download build outputs
         uses: actions/download-artifact@v4
         with:
           pattern: npm-*
           merge-multiple: true
-          path: dist/npm
+          path: dist
 
-      # 主包不用编译，pack.mjs 加 --wrapper-only 只生成它的目录。
-      - name: Stage wrapper
-        run: >-
-          node npm/pack.mjs
-          --version "${{ needs.version.outputs.version }}"
-          --out dist/npm
-          --wrapper-only
-
-      - name: Pack tarballs
+      # No wrapper package here on purpose: on its own it cannot run anything,
+      # so two plain binaries the user can chmod and point install.sh at are
+      # the only useful thing to hand out.
+      - name: List release assets
         run: |
           set -euo pipefail
-          npm pack --silent --pack-destination dist/npm dist/npm/wrapper
-          ls -lh dist/npm/*.tgz
+          chmod 0755 dist/release/*
+          ls -lh dist/release/
 
       - name: Upload release assets
         if: github.event_name != 'workflow_dispatch' || inputs.dry_run == false
@@ -152,13 +159,18 @@ jobs:
         with:
           name: v${{ needs.version.outputs.version }}
           generate_release_notes: true
-          files: dist/npm/*.tgz
+          files: dist/release/*
 
       - name: Summary
         run: |
           echo "### 第一段：GitHub Release" >> "${GITHUB_STEP_SUMMARY}"
           if [[ "${PUBLISHED}" == "true" ]]; then
-            echo "已发布 v${VERSION}，三个压缩包挂在 Release 页面。" >> "${GITHUB_STEP_SUMMARY}"
+            echo "已发布 v${VERSION}，Release 页面提供两个原始可执行文件：" >> "${GITHUB_STEP_SUMMARY}"
+            echo '```' >> "${GITHUB_STEP_SUMMARY}"
+            echo "clawbench-fleet-linux-x64    普通 Intel/AMD 服务器" >> "${GITHUB_STEP_SUMMARY}"
+            echo "clawbench-fleet-linux-arm64  ARM 服务器" >> "${GITHUB_STEP_SUMMARY}"
+            echo '```' >> "${GITHUB_STEP_SUMMARY}"
+            echo "下载后 chmod +x，再用 sudo ./deploy/install.sh --binary <文件> 安装。" >> "${GITHUB_STEP_SUMMARY}"
           else
             echo "只打包未发布（dry run）。" >> "${GITHUB_STEP_SUMMARY}"
           fi
@@ -183,12 +195,12 @@ jobs:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Download tarballs from the release job
+      - name: Download build outputs
         uses: actions/download-artifact@v4
         with:
           pattern: npm-*
           merge-multiple: true
-          path: dist/npm
+          path: dist
 
       - name: Stage wrapper
         run: >-
