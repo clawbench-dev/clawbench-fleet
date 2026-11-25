@@ -83,31 +83,16 @@ jobs:
           cache: 'npm'
           cache-dependency-path: web/package-lock.json
 
-      # 前端只在一个 job 里构建，另一个架构复用产物；两个 job 各跑一遍
-      # npm ci 纯属浪费。
-      - name: Build frontend (linux-x64 only)
-        if: matrix.target == 'linux-x64'
+      # Both matrix jobs build the frontend themselves. Sharing it through an
+      # artifact looked cheaper but is a race: both jobs start at the same time,
+      # so the arm64 job asked for `web-dist` before the x64 job had uploaded it
+      # and failed with "Artifact not found". A frontend build is under a minute,
+      # which is cheaper than a release that fails at random.
+      - name: Build frontend
         working-directory: web
         run: |
-          npm ci
+          npm ci --no-audit --no-fund
           npm run build
-
-      - name: Upload frontend
-        if: matrix.target == 'linux-x64'
-        uses: actions/upload-artifact@v4
-        with:
-          name: web-dist
-          path: web/dist
-          retention-days: 1
-
-      # 复用前必须先把本 job 里那份（只有 x64 才有）落盘，否则下载会
-      # 因为目标目录已存在而失败。
-      - name: Download frontend
-        if: matrix.target != 'linux-x64'
-        uses: actions/download-artifact@v4
-        with:
-          name: web-dist
-          path: web/dist
 
       - name: Stage package
         run: >-
