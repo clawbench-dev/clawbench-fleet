@@ -73,12 +73,21 @@ cd web && npm run dev            # http://127.0.0.1:5173，API 自动代理到 3
 
 环境要求：Linux + systemd（推荐 Ubuntu 22.04+ / Debian 12+）、cgroup v2、root 权限、Node.js 22+（Clawbench 的 ACP 适配器要用）。
 
+从 npm 安装（推荐，后面升级也能一条命令）：
+
+```bash
+sudo npm i -g @xulongzhe/clawbench-fleet
+sudo "$(npm root -g)/@xulongzhe/clawbench-fleet/deploy/install.sh"
+```
+
+从源码安装：
+
 ```bash
 ./build.sh
 sudo ./deploy/install.sh
 ```
 
-安装脚本会：安装二进制到 `/usr/local/bin`、生成 `/etc/clawbench-fleet/config.yaml`、创建数据目录、写入并启动 systemd 服务，然后打印管理地址和初始管理员密码。
+两种方式跑的是同一个安装脚本，做的事情一样：安装二进制到 `/usr/local/bin`（npm 安装时是启动脚本，真正程序在平台包里）、生成 `/etc/clawbench-fleet/config.yaml`、创建数据目录、写入并启动 systemd 服务，然后打印管理地址和初始管理员密码。
 
 登录后：
 
@@ -93,6 +102,9 @@ systemctl status clawbench-fleet
 journalctl -u clawbench-fleet -f
 sudo ./deploy/install.sh --uninstall     # 停服务、删二进制，数据保留
 ```
+
+升级到新版本：`sudo npm i -g @xulongzhe/clawbench-fleet@latest`，然后重启服务
+（`sudo systemctl restart clawbench-fleet`）。安装脚本只在首次安装时写配置，重跑不会覆盖。
 
 ### 配置
 
@@ -129,6 +141,7 @@ internal/
   web/                内嵌前端
 web/                  Vue 3 前端源码
 deploy/               systemd 单元、配置示例、安装脚本
+npm/                  npm 发布用：启动脚本、平台解析、打包脚本、本地预演
 docs/design.md        设计文档
 ```
 
@@ -161,7 +174,7 @@ cd web && npm run build              # 前端类型检查 + 构建
 | Go lint | `golangci.yaml` 全量严格模式；测试文件同样检查，只放行测试里无法避免的几类（gosec / goconst / noctx / 复杂度） |
 | Go 覆盖率 | 两层：① 项目门槛，改动行的包覆盖率不能低于主干基线 1.5 个百分点以上；② 改动行覆盖率 ≥ 80% |
 | 前端覆盖率 | 同上两层，统计 `src/api.ts`、`src/utils.ts`、`src/stores/` |
-| CI | `.github/workflows/ci.yml`：Lint / Test / Integration / Coverage Gate / Frontend |
+| CI | `.github/workflows/ci.yml`：Lint / Test / Integration / Coverage Gate / Package (npm) / Frontend |
 
 主干基线由 CI 在 main 分支构建后上传；本地从没跑过基线时只跑“改动行覆盖”这一层。
 
@@ -172,6 +185,35 @@ cd web && npm run build              # 前端类型检查 + 构建
 ```bash
 cd web && npm run hooks:install
 ```
+
+### 发布
+
+推一个 `v` 开头的 tag 就触发 `.github/workflows/release.yml`：
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+流水线分成两段，各管各的：
+
+| 段落 | 做什么 | 失败的影响 |
+|---|---|---|
+| 第一段：GitHub Release | 编译两个架构、打包、把三个压缩包挂到 Release 页面 | 整条流水线失败 |
+| 第二段：npm | 把同样的三个包发布到 npm | **不影响流水线结论**，第一段发的东西照样能下载 |
+
+这样 npm 那边出问题（账号被锁、包名冲突、网络不通）时，版本仍然算发出来了：用户可以去 Release 页面下载压缩包，用 `sudo ./deploy/install.sh --binary <下好的文件>` 安装。
+
+发布三个包：`@xulongzhe/clawbench-fleet`（主包，只有启动脚本，约 2 KB）加
+`-linux-x64` / `-linux-arm64` 两个平台包（各约 5 MB，真正能跑的程序在里面）。
+用户只装主包，npm 按当前机器的系统架构自动挑平台包。
+
+发之前想先在本机走一遍完整流程（起一个临时 npm 源，真发真装，再验证 `--version` 能透传）：
+
+```bash
+./npm/dry-run.sh
+```
+
+CI 里的 `Package (npm)` 那一项只跑启动脚本的单元测试。
 
 > 本地覆盖率基线放在 `.clawbench-ci/baseline/`，已被 git 忽略，CI 会自动从 main 下载。
 

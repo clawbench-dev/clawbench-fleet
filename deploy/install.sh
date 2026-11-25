@@ -7,7 +7,16 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BIN_SRC="${SCRIPT_DIR}/../clawbench-fleet"
+# The installer ships inside the npm package, so it lives in a different place
+# than when it is run from a git checkout:
+#   repo checkout   deploy/install.sh   -> ../clawbench-fleet
+#   npm package     deploy/install.sh   -> ../bin/clawbench-fleet.js (launcher)
+# Whichever binary is found first wins, in that order.
+if [[ -x "${SCRIPT_DIR}/../clawbench-fleet" ]]; then
+  BIN_SRC="${SCRIPT_DIR}/../clawbench-fleet"
+else
+  BIN_SRC="${SCRIPT_DIR}/../bin/clawbench-fleet.js"
+fi
 BIN_DST="/usr/local/bin/clawbench-fleet"
 CONF_DIR="/etc/clawbench-fleet"
 DATA_DIR="/var/lib/clawbench-fleet"
@@ -36,7 +45,7 @@ if [[ "${ACTION}" == "uninstall" ]]; then
   exit 0
 fi
 
-[[ -x "${BIN_SRC}" ]] || { echo "找不到二进制 ${BIN_SRC}，先运行 ./build.sh"; exit 1; }
+[[ -x "${BIN_SRC}" ]] || { echo "找不到二进制 ${BIN_SRC}：从源码安装请先运行 ./build.sh，用 npm 安装请重装 @xulongzhe/clawbench-fleet"; exit 1; }
 command -v systemctl >/dev/null || { echo "需要 systemd"; exit 1; }
 
 if ! command -v npm >/dev/null; then
