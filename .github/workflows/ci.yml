@@ -111,6 +111,20 @@ jobs:
           path: coverage.out
           retention-days: 90
 
+  npm:
+    name: Package (npm)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Launcher unit tests
+        working-directory: npm
+        run: npm test
+
   frontend:
     name: Frontend (typecheck, test, build)
     runs-on: ubuntu-latest

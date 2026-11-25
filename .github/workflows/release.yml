@@ -1,0 +1,243 @@
+name: Release
+
+# 推一个 v 开头的 tag（例如 v0.1.0）就走两段：
+#   第一段 发布到 GitHub Release —— 三个压缩包（两个平台包 + 主包）挂在 Release 页面
+#   第二段 发布到 npm（@xulongzhe/clawbench-fleet 及两个平台包）
+# 第二段失败不算流水线失败（continue-on-error），因为 Release 页面的包照样能下载安装。
+# 平台包一定先发：主包依赖它们，反过来发会在这段时间里留下一个装不上的版本。
+#
+# 认证用 npm 的 Trusted Publisher（OIDC），仓库里不放任何密钥。
+# 首次发布前需要在那两个平台包的 npm 页面各绑定一次 GitHub 仓库
+# （npmjs.com → 包 → Settings → Trusted Publisher），包还不存在时要先手工发一次占位版本。
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 只打包、不发布（仍需要任意 tag 作为版本来源）
+        type: boolean
+        default: true
+      version:
+        description: 版本号，不带 v，例如 0.1.0
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  id-token: write # OIDC，npm Trusted Publisher 需要
+
+env:
+  # npm 解析 argv 里的路径时按理说用 npm_config_local_prefix，但几个版本行为
+  # 不一致，出过把路径当成包名去仓库根目录找的坑。workflow 里没有仓库级
+  # .npmrc，指向一个空文件即可。
+  NPM_CONFIG_USERCONFIG: ${{ github.workspace }}/.npmrc-empty
+
+jobs:
+  version:
+    name: Check version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.parse.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: parse
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            tag="${GITHUB_REF_NAME}"
+            if ! [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+              echo "tag 必须形如 v1.2.3，收到 ${tag}"; exit 1
+            fi
+            version="${tag#v}"
+          else
+            version="${MANUAL_VERSION#v}"
+            if ! [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+              echo "手工触发要填版本号，形如 1.2.3，收到 ${MANUAL_VERSION}"; exit 1
+            fi
+          fi
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+        env:
+          MANUAL_VERSION: ${{ inputs.version || '0.0.0-dev' }}
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: version
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        target: [linux-x64, linux-arm64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      # 前端只在一个 job 里构建，另一个架构复用产物；两个 job 各跑一遍
+      # npm ci 纯属浪费。
+      - name: Build frontend (linux-x64 only)
+        if: matrix.target == 'linux-x64'
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+      - name: Upload frontend
+        if: matrix.target == 'linux-x64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+          retention-days: 1
+
+      # 复用前必须先把本 job 里那份（只有 x64 才有）落盘，否则下载会
+      # 因为目标目录已存在而失败。
+      - name: Download frontend
+        if: matrix.target != 'linux-x64'
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+
+      - name: Stage package
+        run: >-
+          node npm/pack.mjs
+          --version "${{ needs.version.outputs.version }}"
+          --platform "${{ matrix.target }}"
+          --out dist/npm
+
+      - name: Pack tarball
+        run: npm pack --silent --pack-destination dist/npm "dist/npm/${{ matrix.target }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-${{ matrix.target }}
+          path: dist/npm/*.tgz
+          retention-days: 1
+
+  # 第一段：发布到 GitHub Release。流水线的成功与否只看这一段和前面的构建。
+  github-release:
+    name: Publish to GitHub
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # 创建 Release 要写权限
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Download platform tarballs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: npm-*
+          merge-multiple: true
+          path: dist/npm
+
+      # 主包不用编译，pack.mjs 加 --wrapper-only 只生成它的目录。
+      - name: Stage wrapper
+        run: >-
+          node npm/pack.mjs
+          --version "${{ needs.version.outputs.version }}"
+          --out dist/npm
+          --wrapper-only
+
+      - name: Pack tarballs
+        run: |
+          set -euo pipefail
+          npm pack --silent --pack-destination dist/npm dist/npm/wrapper
+          ls -lh dist/npm/*.tgz
+
+      - name: Upload release assets
+        if: github.event_name != 'workflow_dispatch' || inputs.dry_run == false
+        uses: softprops/action-gh-release@v2
+        with:
+          name: v${{ needs.version.outputs.version }}
+          generate_release_notes: true
+          files: dist/npm/*.tgz
+
+      - name: Summary
+        run: |
+          echo "### 第一段：GitHub Release" >> "${GITHUB_STEP_SUMMARY}"
+          if [[ "${PUBLISHED}" == "true" ]]; then
+            echo "已发布 v${VERSION}，三个压缩包挂在 Release 页面。" >> "${GITHUB_STEP_SUMMARY}"
+          else
+            echo "只打包未发布（dry run）。" >> "${GITHUB_STEP_SUMMARY}"
+          fi
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          PUBLISHED: ${{ github.event_name != 'workflow_dispatch' || inputs.dry_run == false }}
+
+  # 第二段：发布到 npm。这一段失败不影响整条流水线的结论——GitHub Release
+  # 已经完成，用户可以直接从 Release 页下载压缩包手工安装。
+  # continue-on-error 让这一项显示成红色但不把 workflow 判死。
+  npm-publish:
+    name: Publish to npm
+    needs: [version, build, github-release]
+    if: github.event_name != 'workflow_dispatch' || inputs.dry_run == false
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Download tarballs from the release job
+        uses: actions/download-artifact@v4
+        with:
+          pattern: npm-*
+          merge-multiple: true
+          path: dist/npm
+
+      - name: Stage wrapper
+        run: >-
+          node npm/pack.mjs
+          --version "${{ needs.version.outputs.version }}"
+          --out dist/npm
+          --wrapper-only
+
+      - name: Pack tarballs
+        run: |
+          set -euo pipefail
+          npm pack --silent --pack-destination dist/npm dist/npm/wrapper
+          ls -lh dist/npm/*.tgz
+
+      # npm 11 起 publish 支持 OIDC，不需要 NODE_AUTH_TOKEN
+      - name: Publish platform packages first
+        run: |
+          set -euo pipefail
+          for f in dist/npm/xulongzhe-clawbench-fleet-linux-*.tgz; do
+            echo "==> ${f}"
+            npm publish "${f}" --access public --provenance
+          done
+
+      - name: Publish wrapper package last
+        run: npm publish "dist/npm/xulongzhe-clawbench-fleet-${VERSION}.tgz" --access public --provenance
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+
+      - name: Summary
+        run: |
+          echo "### 第二段：npm" >> "${GITHUB_STEP_SUMMARY}"
+          echo "已发布 clawbench-fleet ${VERSION}。" >> "${GITHUB_STEP_SUMMARY}"
+          echo '```' >> "${GITHUB_STEP_SUMMARY}"
+          echo "npm i -g @xulongzhe/clawbench-fleet" >> "${GITHUB_STEP_SUMMARY}"
+          echo '```' >> "${GITHUB_STEP_SUMMARY}"
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
