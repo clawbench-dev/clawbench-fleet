@@ -1,0 +1,10 @@
+{
+  "name": "clawbench-fleet-npm",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Build tooling for the published @xulongzhe/clawbench-fleet packages",
+  "scripts": {
+    "test": "node --test bin/platform.test.js"
+  }
+}
